@@ -1,14 +1,29 @@
-"""Tools for interacting with GitHub repositories."""
+"""Tools for interacting with GitHub repositories via GitHub App auth."""
 
 import os
+import time
 
 from langchain_core.tools import tool
 
 
 def _github():
-    from github import Github
+    """Authenticate as a GitHub App installation and return a Github client."""
+    import jwt
+    from github import Github, GithubIntegration
 
-    return Github(os.environ["GITHUB_TOKEN"])
+    app_id = os.environ["GITHUB_APP_ID"]
+    private_key = os.environ["GITHUB_APP_PRIVATE_KEY"]
+
+    integration = GithubIntegration(app_id, private_key)
+
+    # Get the installation for the Quote-ly org
+    installations = integration.get_installations()
+    if not installations:
+        raise RuntimeError("GitHub App is not installed on any organization.")
+
+    installation_id = installations[0].id
+    access_token = integration.get_access_token(installation_id).token
+    return Github(access_token)
 
 
 @tool
