@@ -1,16 +1,19 @@
 """VirtualDojo MCP client — OAuth SSO + dynamic CRM tool calling."""
 
+import asyncio
 import hashlib
 import base64
 import secrets
 import os
 import time
+import logging
 from typing import Any
 
 import httpx
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Token store — per-user tokens keyed by Teams user ID
@@ -27,6 +30,115 @@ BOT_CALLBACK_URL = os.environ.get(
     "BOT_CALLBACK_URL",
     "https://samurai-bot-1019610148219.us-central1.run.app/api/oauth/callback",
 )
+
+MAX_RETRIES = 2
+RETRY_DELAY = 1.0  # seconds
+CIRCUIT_BREAKER_COOLDOWN = 60  # seconds before retrying after repeated failures
+CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures to trip the breaker
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker — stop calling MCP if it's down, reset after cooldown
+# ---------------------------------------------------------------------------
+
+class _CircuitBreaker:
+    def __init__(self, threshold: int = CIRCUIT_BREAKER_THRESHOLD, cooldown: float = CIRCUIT_BREAKER_COOLDOWN):
+        self.threshold = threshold
+        self.cooldown = cooldown
+        self.failure_count = 0
+        self.last_failure_time: float = 0
+        self.open = False
+
+    def record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = time.time()
+        if self.failure_count >= self.threshold:
+            self.open = True
+            logger.warning(
+                f"Circuit breaker OPEN — VirtualDojo MCP server failed "
+                f"{self.failure_count} times. Will retry after {self.cooldown}s."
+            )
+
+    def record_success(self):
+        if self.failure_count > 0:
+            logger.info("Circuit breaker RESET — VirtualDojo MCP server recovered.")
+        self.failure_count = 0
+        self.open = False
+
+    def is_available(self) -> bool:
+        if not self.open:
+            return True
+        # Check if cooldown has elapsed
+        elapsed = time.time() - self.last_failure_time
+        if elapsed >= self.cooldown:
+            logger.info(
+                f"Circuit breaker HALF-OPEN — {elapsed:.0f}s since last failure, "
+                f"allowing one request through."
+            )
+            return True
+        return False
+
+    def time_until_retry(self) -> float:
+        if not self.open:
+            return 0
+        remaining = self.cooldown - (time.time() - self.last_failure_time)
+        return max(0, remaining)
+
+
+_circuit = _CircuitBreaker()
+
+
+# ---------------------------------------------------------------------------
+# Retry helper
+# ---------------------------------------------------------------------------
+
+async def _request_with_retry(
+    method: str,
+    url: str,
+    retries: int = MAX_RETRIES,
+    timeout: float = 15,
+    **kwargs,
+) -> httpx.Response:
+    """Make an HTTP request with retries and circuit breaker protection."""
+    if not _circuit.is_available():
+        remaining = _circuit.time_until_retry()
+        raise ConnectionError(
+            f"VirtualDojo CRM is temporarily unavailable. Will retry in {remaining:.0f}s."
+        )
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.request(method, url, **kwargs)
+                # Retry on 5xx server errors and 429 rate limits
+                if resp.status_code >= 500 or resp.status_code == 429:
+                    _circuit.record_failure()
+                    if attempt < retries:
+                        delay = RETRY_DELAY * (2 ** attempt)
+                        logger.warning(
+                            f"MCP request {method} {url} returned {resp.status_code}, "
+                            f"retrying in {delay}s (attempt {attempt + 1}/{retries})"
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    return resp
+                # Success — reset circuit breaker
+                _circuit.record_success()
+                return resp
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+            last_error = e
+            _circuit.record_failure()
+            if attempt < retries:
+                delay = RETRY_DELAY * (2 ** attempt)
+                logger.warning(
+                    f"MCP request {method} {url} failed with {type(e).__name__}, "
+                    f"retrying in {delay}s (attempt {attempt + 1}/{retries})"
+                )
+                await asyncio.sleep(delay)
+            else:
+                raise
+    raise last_error
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +159,9 @@ async def _ensure_client_registered() -> dict:
     if _client_creds:
         return _client_creds
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
+    try:
+        resp = await _request_with_retry(
+            "POST",
             f"{MCP_URL}/oauth/register",
             json={
                 "client_name": "SamurAI Teams Bot",
@@ -58,15 +171,15 @@ async def _ensure_client_registered() -> dict:
         resp.raise_for_status()
         _client_creds = resp.json()
         return _client_creds
+    except Exception as e:
+        logger.error(f"Failed to register with VirtualDojo MCP server: {e}")
+        raise
 
 
 def get_login_url(user_id: str) -> str | None:
     """Build the OAuth authorize URL for a user. Returns URL or None if already authed."""
     if user_id in _token_store and _is_token_valid(user_id):
         return None
-
-    # This will be called from an async context, but we need sync for the tool.
-    # The actual registration happens in start_oauth_flow (async).
     return f"_pending:{user_id}"
 
 
@@ -102,8 +215,9 @@ async def exchange_code(code: str, state: str) -> dict | None:
         return None
 
     creds = await _ensure_client_registered()
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
+    try:
+        resp = await _request_with_retry(
+            "POST",
             f"{MCP_URL}/oauth/token",
             data={
                 "grant_type": "authorization_code",
@@ -116,6 +230,9 @@ async def exchange_code(code: str, state: str) -> dict | None:
         )
         resp.raise_for_status()
         tokens = resp.json()
+    except Exception as e:
+        logger.error(f"Failed to exchange OAuth code: {e}")
+        return None
 
     _token_store[flow["user_id"]] = {
         "access_token": tokens["access_token"],
@@ -149,18 +266,18 @@ async def _get_access_token(user_id: str) -> str | None:
 
     creds = await _ensure_client_registered()
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(
-                f"{MCP_URL}/oauth/token",
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": t["refresh_token"],
-                    "client_id": creds["client_id"],
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            )
-            resp.raise_for_status()
-            tokens = resp.json()
+        resp = await _request_with_retry(
+            "POST",
+            f"{MCP_URL}/oauth/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": t["refresh_token"],
+                "client_id": creds["client_id"],
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        tokens = resp.json()
 
         _token_store[user_id] = {
             "access_token": tokens["access_token"],
@@ -168,7 +285,8 @@ async def _get_access_token(user_id: str) -> str | None:
             "expires_at": time.time() + tokens.get("expires_in", 1800),
         }
         return tokens["access_token"]
-    except Exception:
+    except Exception as e:
+        logger.error(f"Failed to refresh token for user {user_id}: {e}")
         del _token_store[user_id]
         return None
 
@@ -188,14 +306,19 @@ async def list_mcp_tools(user_id: str) -> list[dict]:
     if not token:
         return []
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
+    try:
+        resp = await _request_with_retry(
+            "POST",
             f"{MCP_URL}/tools/list",
             headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
         )
         resp.raise_for_status()
         data = resp.json()
         return data.get("tools", [])
+    except Exception as e:
+        logger.error(f"Failed to list MCP tools: {e}")
+        return []
 
 
 async def call_mcp_tool(user_id: str, tool_name: str, arguments: dict) -> dict:
@@ -204,31 +327,40 @@ async def call_mcp_tool(user_id: str, tool_name: str, arguments: dict) -> dict:
     if not token:
         return {"error": "Not authenticated. Please sign in to VirtualDojo first."}
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(
+    try:
+        resp = await _request_with_retry(
+            "POST",
             f"{MCP_URL}/tools/call",
             json={"name": tool_name, "arguments": arguments},
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             },
+            timeout=60,
         )
+        if resp.status_code == 401:
+            # Token may be invalid — clear it so user re-authenticates
+            _token_store.pop(user_id, None)
+            return {"error": "Your VirtualDojo session expired. Please sign in again."}
+        if resp.status_code == 403:
+            return {"error": "You don't have permission to use this CRM tool. Check your VirtualDojo profile permissions."}
         resp.raise_for_status()
         return resp.json()
+    except ConnectionError as e:
+        # Circuit breaker is open
+        return {"error": str(e)}
+    except httpx.TimeoutException:
+        return {"error": "The CRM request timed out. The VirtualDojo server may be slow — please try again."}
+    except httpx.ConnectError:
+        return {"error": "Could not connect to VirtualDojo CRM. The service may be temporarily unavailable."}
+    except Exception as e:
+        logger.error(f"MCP tool call '{tool_name}' failed: {e}")
+        return {"error": f"CRM request failed: {str(e)}"}
 
 
 # ---------------------------------------------------------------------------
 # LangGraph tool wrappers
 # ---------------------------------------------------------------------------
-
-def _make_crm_tool_description() -> str:
-    """Generic description for the CRM query tool."""
-    return (
-        "Query the VirtualDojo CRM system. Use this to search contacts, accounts, "
-        "opportunities, quotes, and other CRM records. The user must be authenticated "
-        "to VirtualDojo first. If not authenticated, tell them to sign in."
-    )
-
 
 class VirtualDojoQueryInput(BaseModel):
     tool_name: str = Field(description="The MCP tool name to call (e.g., 'search_records', 'list_objects', 'describe_object', 'create_record')")
@@ -289,7 +421,7 @@ def create_virtualdojo_list_tools(user_id: str) -> StructuredTool:
 
         tools = await list_mcp_tools(user_id)
         if not tools:
-            return "No CRM tools available. You may not have the right permissions."
+            return "No CRM tools available. Either VirtualDojo is unreachable or you may not have the right permissions."
 
         lines = []
         for t in tools:

@@ -27,6 +27,7 @@ def list_cloud_run_services(
         name = svc.name.split("/")[-1]
         condition = svc.terminal_condition
         status = condition.state.name if condition else "UNKNOWN"
-        results.append(f"{name} | Status: {status} | URL: {svc.uri}")
+        revision = svc.latest_ready_revision.split("/")[-1] if svc.latest_ready_revision else "unknown"
+        results.append(f"{name} | Status: {status} | Revision: {revision} | URL: {svc.uri}")
 
     return "\n".join(results) if results else "No Cloud Run services found."
