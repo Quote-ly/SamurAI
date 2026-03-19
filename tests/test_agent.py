@@ -22,31 +22,39 @@ def mock_llm():
         yield mock_instance, agent
 
 
-def test_tools_list_contains_all_six(mock_llm):
+def test_static_tools_list(mock_llm):
     _, agent = mock_llm
-    assert len(agent.TOOLS) == 6
-    tool_names = {t.name for t in agent.TOOLS}
+    assert len(agent.STATIC_TOOLS) == 11
+    tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
     assert "check_gcp_metrics" in tool_names
     assert "github_list_prs" in tool_names
     assert "github_get_pr_details" in tool_names
     assert "github_list_recent_commits" in tool_names
+    assert "github_list_issues" in tool_names
+    assert "github_get_issue_details" in tool_names
+    assert "github_create_issue" in tool_names
+    assert "github_list_workflow_runs" in tool_names
+    assert "github_get_workflow_run_details" in tool_names
 
 
 def test_system_prompt_defined(mock_llm):
     _, agent = mock_llm
     assert "SamurAI" in agent.SYSTEM_PROMPT
     assert "DevOps" in agent.SYSTEM_PROMPT
+    assert "VirtualDojo CRM" in agent.SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
 async def test_run_agent_returns_final_message(mock_llm):
     _, agent = mock_llm
-    # Patch the compiled graph's ainvoke
-    agent._app.ainvoke = AsyncMock(
+    # Patch the per-user graph
+    mock_graph = MagicMock()
+    mock_graph.ainvoke = AsyncMock(
         return_value={"messages": [MagicMock(content="Here are your logs.")]}
     )
+    agent._get_graph = MagicMock(return_value=mock_graph)
 
     result = await agent.run_agent("show me recent errors")
     assert result == "Here are your logs."
@@ -55,13 +63,15 @@ async def test_run_agent_returns_final_message(mock_llm):
 @pytest.mark.asyncio
 async def test_run_agent_passes_human_message(mock_llm):
     _, agent = mock_llm
-    agent._app.ainvoke = AsyncMock(
+    mock_graph = MagicMock()
+    mock_graph.ainvoke = AsyncMock(
         return_value={"messages": [MagicMock(content="ok")]}
     )
+    agent._get_graph = MagicMock(return_value=mock_graph)
 
     await agent.run_agent("check cloud run services")
 
-    call_args = agent._app.ainvoke.call_args[0][0]
+    call_args = mock_graph.ainvoke.call_args[0][0]
     messages = call_args["messages"]
     assert len(messages) == 1
     assert messages[0].content == "check cloud run services"

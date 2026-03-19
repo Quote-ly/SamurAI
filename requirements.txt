@@ -9,4 +9,5 @@ google-cloud-run>=0.10
 google-cloud-resource-manager>=1.0
 PyGithub>=2.0
 PyJWT[crypto]>=2.0
+httpx>=0.28
 aiohttp>=3.9

@@ -65,27 +65,42 @@ async def test_messages_returns_200_for_valid_json(client, patched_app):
 async def test_on_message_calls_run_agent(patched_app):
     ctx = MagicMock()
     ctx.activity.text = "show logs"
+    ctx.activity.from_property.id = "user-123"
+    ctx.activity.from_property.name = "Test User"
+    ctx.activity.conversation.id = "conv-123"
+    ctx.activity.local_timezone = None
     ctx.send_activity = AsyncMock()
 
     with patch.object(patched_app, "run_agent", new_callable=AsyncMock, return_value="here are logs"):
         await patched_app.on_message(ctx)
 
-    # Should have sent typing + response
-    assert ctx.send_activity.call_count == 2
+    # Should have sent at least typing + response
+    sent_types = [call[0][0].type if hasattr(call[0][0], 'type') else 'text' for call in ctx.send_activity.call_args_list]
+    assert "message" in sent_types
 
 
 @pytest.mark.asyncio
 async def test_on_message_sends_typing_indicator(patched_app):
+    import asyncio
+
     ctx = MagicMock()
     ctx.activity.text = "hi"
+    ctx.activity.from_property.id = "user-123"
+    ctx.activity.from_property.name = "Test User"
+    ctx.activity.conversation.id = "conv-123"
+    ctx.activity.local_timezone = None
     ctx.send_activity = AsyncMock()
 
-    with patch.object(patched_app, "run_agent", new_callable=AsyncMock, return_value="hey"):
+    async def slow_agent(*args, **kwargs):
+        await asyncio.sleep(0.1)  # Give typing task time to fire
+        return "hey"
+
+    with patch.object(patched_app, "run_agent", side_effect=slow_agent):
         await patched_app.on_message(ctx)
 
-    first_call = ctx.send_activity.call_args_list[0]
-    activity = first_call[0][0]
-    assert activity.type == "typing"
+    # At least one typing indicator should have been sent
+    sent_types = [call[0][0].type if hasattr(call[0][0], 'type') else 'text' for call in ctx.send_activity.call_args_list]
+    assert "typing" in sent_types
 
 
 @pytest.mark.asyncio

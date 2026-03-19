@@ -1,0 +1,68 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.19",
+  "version": "1.1.0",
+  "id": "35e1851a-0377-47f3-8b47-09110fec743c",
+  "developer": {
+    "name": "VirtualDojo",
+    "websiteUrl": "https://virtualdojo.com",
+    "privacyUrl": "https://virtualdojo.com/privacy",
+    "termsOfUseUrl": "https://virtualdojo.com/terms"
+  },
+  "name": {
+    "short": "SamurAI",
+    "full": "SamurAI DevOps Assistant"
+  },
+  "description": {
+    "short": "DevOps assistant for GCP and GitHub",
+    "full": "SamurAI is a DevOps chatbot that helps your team check Google Cloud infrastructure, read logs, monitor services, and review GitHub activity — all from Microsoft Teams."
+  },
+  "icons": {
+    "outline": "outline.png",
+    "color": "color.png"
+  },
+  "accentColor": "#1A1A2E",
+  "bots": [
+    {
+      "botId": "35e1851a-0377-47f3-8b47-09110fec743c",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": ["personal", "team", "groupChat"],
+          "commands": [
+            {
+              "title": "check logs for errors",
+              "description": "Search Cloud Logging across GCP projects"
+            },
+            {
+              "title": "list services",
+              "description": "Check status of Cloud Run services"
+            },
+            {
+              "title": "show open PRs",
+              "description": "List pull requests for a GitHub repo"
+            },
+            {
+              "title": "check CI/CD status",
+              "description": "Check GitHub Actions workflow runs"
+            },
+            {
+              "title": "list open issues",
+              "description": "View and create GitHub issues"
+            },
+            {
+              "title": "recent commits",
+              "description": "Review latest commit history"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": [
+    "samurai-bot-1019610148219.us-central1.run.app"
+  ]
+}
