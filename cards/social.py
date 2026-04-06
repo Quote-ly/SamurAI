@@ -30,7 +30,8 @@ def build_social_preview_card(
             {
                 "type": "Image",
                 "url": image_url,
-                "size": "large",
+                "size": "stretch",
+                "width": "400px",
                 "altText": "Post preview image",
             }
         )
