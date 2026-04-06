@@ -1,6 +1,7 @@
 """Microsoft Teams bot entrypoint — runs on Cloud Run via aiohttp."""
 
 import asyncio
+import json
 import os
 
 from aiohttp import web
@@ -15,6 +16,7 @@ from botbuilder.schema import Activity
 from agent import run_agent, inject_auth_message
 from tools.virtualdojo_mcp import exchange_code, start_oauth_flow
 from tools.social_media import _pending_cards
+from tools.background_tasks import _pending_task_context
 from cards.social import (
     build_social_preview_card,
     build_scheduled_posts_cards,
@@ -98,6 +100,63 @@ async def on_message(turn_context: TurnContext):
         user_email = user_name
     print(f"[on_message] user={user_name} email={user_email} id={user_id}", flush=True)
 
+    # Only allow virtualdojo.com users
+    if not user_email or not user_email.lower().endswith("@virtualdojo.com"):
+        stop_typing.set()
+        await typing_task
+        await turn_context.send_activity(
+            Activity(
+                type="message",
+                text="Sorry, SamurAI is only available to VirtualDojo team members.",
+            )
+        )
+        print(f"[on_message] BLOCKED unauthorized user: {user_email or user_id}", flush=True)
+        return
+
+    # Persist conversation reference for proactive messaging (background tasks)
+    try:
+        from task_store import get_task_store
+
+        _store = await get_task_store()
+        conv_ref = TurnContext.get_conversation_reference(turn_context.activity)
+        await _store.save_conversation_ref(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            ref_json=json.dumps(conv_ref.serialize()),
+        )
+        # Auto-populate team roster with current user
+        if user_email:
+            service_url = turn_context.activity.service_url or ""
+            tenant_id = ""
+            if hasattr(turn_context.activity, "channel_data") and turn_context.activity.channel_data:
+                tenant_id = turn_context.activity.channel_data.get("tenant", {}).get("id", "")
+            await _store.save_team_member(
+                email=user_email,
+                teams_id=user_id,
+                display_name=user_name,
+                service_url=service_url,
+                tenant_id=tenant_id,
+            )
+        # Discover other team members if in a team context
+        try:
+            from botbuilder.core.teams import TeamsInfo as _TeamsInfo
+
+            members = await _TeamsInfo.get_members(turn_context)
+            for m in members:
+                m_email = m.email or m.user_principal_name or ""
+                if m_email:
+                    await _store.save_team_member(
+                        email=m_email,
+                        teams_id=m.id,
+                        display_name=m.name or "",
+                        service_url=turn_context.activity.service_url or "",
+                        tenant_id=tenant_id,
+                    )
+        except Exception:
+            pass  # Not in a team context or roster fetch failed
+    except Exception as e:
+        print(f"[on_message] persist conversation ref failed: {e}", flush=True)
+
     try:
         # Check if user is asking to connect to VirtualDojo CRM
         msg_lower = user_message.lower()
@@ -142,6 +201,12 @@ async def on_message(turn_context: TurnContext):
             )
             return
 
+        # Provide user context for background task tools
+        _pending_task_context[conversation_id] = {
+            "user_id": user_id,
+            "user_name": user_name,
+            "user_timezone": local_tz,
+        }
         response = await run_agent(
             user_message,
             conversation_id=conversation_id,
@@ -150,6 +215,7 @@ async def on_message(turn_context: TurnContext):
             user_timezone=local_tz,
             user_email=user_email,
         )
+        _pending_task_context.pop(conversation_id, None)
     finally:
         stop_typing.set()
         await typing_task
@@ -319,6 +385,24 @@ app = web.Application()
 app.router.add_post("/api/messages", messages)
 app.router.add_get("/api/oauth/callback", oauth_callback)
 app.router.add_get("/health", health)
+
+
+async def on_startup(app_instance):
+    from scheduler import init_scheduler
+
+    await init_scheduler(adapter, settings.app_id)
+    print("[startup] Background task scheduler started", flush=True)
+
+
+async def on_cleanup(app_instance):
+    from scheduler import shutdown_scheduler
+
+    await shutdown_scheduler()
+    print("[cleanup] Background task scheduler stopped", flush=True)
+
+
+app.on_startup.append(on_startup)
+app.on_cleanup.append(on_cleanup)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))

@@ -64,17 +64,37 @@ async def test_messages_returns_200_for_valid_json(client, patched_app):
 # --- Unit tests for handler functions ---
 
 
-@pytest.mark.asyncio
-async def test_on_message_calls_run_agent(patched_app):
+def _make_turn_context(text="show logs", email="devin@virtualdojo.com"):
+    """Create a mock TurnContext with a virtualdojo.com user."""
     ctx = MagicMock()
-    ctx.activity.text = "show logs"
+    ctx.activity.text = text
     ctx.activity.from_property.id = "user-123"
     ctx.activity.from_property.name = "Test User"
     ctx.activity.conversation.id = "conv-123"
     ctx.activity.local_timezone = None
+    ctx.activity.service_url = "https://smba.trafficmanager.net/teams/"
+    ctx.activity.channel_data = None
+    ctx.activity.value = None
     ctx.send_activity = AsyncMock()
 
-    with patch.object(patched_app, "run_agent", new_callable=AsyncMock, return_value="here are logs"):
+    # Mock TeamsInfo to return the email
+    member = MagicMock()
+    member.email = email
+    member.user_principal_name = email
+    member.id = "user-123"
+    member.name = "Test User"
+    return ctx, member
+
+
+@pytest.mark.asyncio
+async def test_on_message_calls_run_agent(patched_app):
+    ctx, member = _make_turn_context("show logs")
+
+    with (
+        patch.object(patched_app, "run_agent", new_callable=AsyncMock, return_value="here are logs"),
+        patch("botbuilder.core.teams.TeamsInfo.get_member", new_callable=AsyncMock, return_value=member),
+        patch("task_store.get_task_store", new_callable=AsyncMock),
+    ):
         await patched_app.on_message(ctx)
 
     # Should have sent at least typing + response
@@ -86,24 +106,54 @@ async def test_on_message_calls_run_agent(patched_app):
 async def test_on_message_sends_typing_indicator(patched_app):
     import asyncio
 
-    ctx = MagicMock()
-    ctx.activity.text = "hi"
-    ctx.activity.from_property.id = "user-123"
-    ctx.activity.from_property.name = "Test User"
-    ctx.activity.conversation.id = "conv-123"
-    ctx.activity.local_timezone = None
-    ctx.send_activity = AsyncMock()
+    ctx, member = _make_turn_context("hi")
 
     async def slow_agent(*args, **kwargs):
         await asyncio.sleep(0.1)  # Give typing task time to fire
         return "hey"
 
-    with patch.object(patched_app, "run_agent", side_effect=slow_agent):
+    with (
+        patch.object(patched_app, "run_agent", side_effect=slow_agent),
+        patch("botbuilder.core.teams.TeamsInfo.get_member", new_callable=AsyncMock, return_value=member),
+        patch("task_store.get_task_store", new_callable=AsyncMock),
+    ):
         await patched_app.on_message(ctx)
 
     # At least one typing indicator should have been sent
     sent_types = [call[0][0].type if hasattr(call[0][0], 'type') else 'text' for call in ctx.send_activity.call_args_list]
     assert "typing" in sent_types
+
+
+@pytest.mark.asyncio
+async def test_on_message_blocks_non_virtualdojo_user(patched_app):
+    ctx, member = _make_turn_context("show logs", email="outsider@gmail.com")
+
+    with (
+        patch.object(patched_app, "run_agent", new_callable=AsyncMock) as mock_agent,
+        patch("botbuilder.core.teams.TeamsInfo.get_member", new_callable=AsyncMock, return_value=member),
+    ):
+        await patched_app.on_message(ctx)
+
+    mock_agent.assert_not_called()
+    sent_texts = [
+        str(call[0][0].text) if hasattr(call[0][0], 'text') else str(call[0][0])
+        for call in ctx.send_activity.call_args_list
+        if hasattr(call[0][0], 'type') and call[0][0].type == "message"
+    ]
+    assert any("VirtualDojo" in t for t in sent_texts)
+
+
+@pytest.mark.asyncio
+async def test_on_message_blocks_user_with_no_email(patched_app):
+    ctx, member = _make_turn_context("show logs", email="")
+
+    with (
+        patch.object(patched_app, "run_agent", new_callable=AsyncMock) as mock_agent,
+        patch("botbuilder.core.teams.TeamsInfo.get_member", new_callable=AsyncMock, side_effect=Exception("no email")),
+    ):
+        await patched_app.on_message(ctx)
+
+    mock_agent.assert_not_called()
 
 
 @pytest.mark.asyncio

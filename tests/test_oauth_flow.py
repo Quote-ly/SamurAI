@@ -140,6 +140,8 @@ async def test_connect_phrase_stores_conv_ref(patched_app):
     ctx.send_activity = AsyncMock()
     ctx.turn_state = {}
 
+    mock_store = AsyncMock()
+
     with (
         patch.object(
             patched_app,
@@ -150,18 +152,20 @@ async def test_connect_phrase_stores_conv_ref(patched_app):
                 "state-xyz",
             ),
         ),
-        patch.object(
-            patched_app,
-            "TeamsInfo",
-            create=True,
-        ),
         patch(
-            "app.TeamsInfo.get_member",
+            "botbuilder.core.teams.TeamsInfo.get_member",
             new_callable=AsyncMock,
             return_value=MagicMock(
-                email="test@virtualdojo.com", user_principal_name=""
+                email="test@virtualdojo.com", user_principal_name="",
+                id="user-123", name="Test User",
             ),
         ),
+        patch(
+            "botbuilder.core.teams.TeamsInfo.get_members",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch("task_store.get_task_store", new_callable=AsyncMock, return_value=mock_store),
     ):
         await patched_app.on_message(ctx)
 

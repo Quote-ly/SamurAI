@@ -39,7 +39,7 @@ def mock_llm():
 
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
-    assert len(agent.STATIC_TOOLS) == 25
+    assert len(agent.STATIC_TOOLS) == 33
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -63,6 +63,16 @@ def test_static_tools_list(mock_llm):
     assert "social_delete_post" in tool_names
     # Google search
     assert "google_search" in tool_names
+    # Background task tools
+    assert "create_background_task" in tool_names
+    assert "list_background_tasks" in tool_names
+    assert "pause_background_task" in tool_names
+    assert "resume_background_task" in tool_names
+    assert "cancel_background_task" in tool_names
+    # Teams messaging tools
+    assert "send_teams_message" in tool_names
+    assert "lookup_team_member" in tool_names
+    assert "list_team_members" in tool_names
 
 
 def test_system_prompt_defined(mock_llm):
@@ -72,6 +82,11 @@ def test_system_prompt_defined(mock_llm):
     assert "VirtualDojo CRM" in agent.SYSTEM_PROMPT
     assert "Long-term Memory" in agent.SYSTEM_PROMPT
     assert "save_memory" in agent.SYSTEM_PROMPT
+    # Autonomous agent capabilities
+    assert "FULLY AUTONOMOUS" in agent.SYSTEM_PROMPT
+    assert "Background Tasks" in agent.SYSTEM_PROMPT or "background_task" in agent.SYSTEM_PROMPT
+    assert "AUTONOMY RULES" in agent.SYSTEM_PROMPT
+    assert "send_teams_message" in agent.SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

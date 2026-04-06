@@ -55,6 +55,18 @@
             {
               "title": "recent commits",
               "description": "Review latest commit history"
+            },
+            {
+              "title": "create a background task",
+              "description": "Schedule a recurring or one-shot autonomous task"
+            },
+            {
+              "title": "list my tasks",
+              "description": "Show active background tasks"
+            },
+            {
+              "title": "send a message to",
+              "description": "Send a Teams message to a team member"
             }
           ]
         }

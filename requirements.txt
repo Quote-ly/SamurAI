@@ -14,3 +14,4 @@ httpx>=0.28
 aiohttp>=3.9
 aiosqlite>=0.20
 numpy>=2.0
+APScheduler>=3.10

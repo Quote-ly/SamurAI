@@ -55,6 +55,15 @@ async def handle_card_action(turn_context: TurnContext, value: dict):
         await _handle_schedule(turn_context, conversation_id, schedule_date)
     elif action == "social_reject":
         await _handle_reject(turn_context, conversation_id)
+    elif action == "task_pause":
+        task_id = value.get("task_id", "")
+        await _handle_task_pause(turn_context, task_id)
+    elif action == "task_resume":
+        task_id = value.get("task_id", "")
+        await _handle_task_resume(turn_context, task_id)
+    elif action == "task_cancel":
+        task_id = value.get("task_id", "")
+        await _handle_task_cancel(turn_context, task_id)
     else:
         await turn_context.send_activity(
             Activity(type="message", text=f"Unknown action: {action}")
@@ -312,4 +321,65 @@ async def _update_or_send_card(
     # Fallback: send new card + text
     await turn_context.send_activity(
         Activity(type="message", attachments=[attachment], text=text_response)
+    )
+
+
+# ── Background task card action handlers ───────────────────────────────
+
+
+async def _handle_task_pause(turn_context, task_id: str):
+    from task_store import get_task_store
+    from scheduler import pause_task
+
+    store = await get_task_store()
+    task = await store.get_task(task_id)
+    if not task:
+        await turn_context.send_activity(
+            Activity(type="message", text=f"Task {task_id} not found.")
+        )
+        return
+    await pause_task(task_id)
+    await store.update_task(task_id, status="paused")
+    await turn_context.send_activity(
+        Activity(
+            type="message",
+            text=f"Task {task_id} paused. Say 'resume task {task_id}' to restart it.",
+        )
+    )
+
+
+async def _handle_task_resume(turn_context, task_id: str):
+    from task_store import get_task_store
+    from scheduler import resume_task
+
+    store = await get_task_store()
+    task = await store.get_task(task_id)
+    if not task:
+        await turn_context.send_activity(
+            Activity(type="message", text=f"Task {task_id} not found.")
+        )
+        return
+    await store.update_task(task_id, status="active", error_count=0, last_error=None)
+    task["status"] = "active"
+    await resume_task(task)
+    await turn_context.send_activity(
+        Activity(type="message", text=f"Task {task_id} resumed.")
+    )
+
+
+async def _handle_task_cancel(turn_context, task_id: str):
+    from task_store import get_task_store
+    from scheduler import cancel_task
+
+    store = await get_task_store()
+    task = await store.get_task(task_id)
+    if not task:
+        await turn_context.send_activity(
+            Activity(type="message", text=f"Task {task_id} not found.")
+        )
+        return
+    await cancel_task(task_id)
+    await store.delete_task(task_id)
+    await turn_context.send_activity(
+        Activity(type="message", text=f"Task {task_id} cancelled and removed.")
     )
