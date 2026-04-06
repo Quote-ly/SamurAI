@@ -11,7 +11,10 @@ from aiohttp import web
 def patched_app():
     """Import app.py with Bot Framework adapter and agent mocked."""
     with (
-        patch("langchain_google_vertexai.ChatVertexAI", MagicMock()),
+        patch("langchain_google_genai.ChatGoogleGenerativeAI", MagicMock()),
+        patch("memory.get_checkpointer", new_callable=AsyncMock),
+        patch("memory.retrieve_relevant_memories", new_callable=AsyncMock, return_value=None),
+        patch("memory.create_memory_tools", return_value=[]),
         patch("botbuilder.core.BotFrameworkAdapter") as mock_adapter_cls,
     ):
         mock_adapter = MagicMock()

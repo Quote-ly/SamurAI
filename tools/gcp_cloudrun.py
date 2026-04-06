@@ -4,7 +4,6 @@ import os
 
 from langchain_core.tools import tool
 
-
 @tool
 def list_cloud_run_services(
     project_id: str | None = None, region: str = "-"
@@ -27,7 +26,13 @@ def list_cloud_run_services(
         name = svc.name.split("/")[-1]
         condition = svc.terminal_condition
         status = condition.state.name if condition else "UNKNOWN"
-        revision = svc.latest_ready_revision.split("/")[-1] if svc.latest_ready_revision else "unknown"
-        results.append(f"{name} | Status: {status} | Revision: {revision} | URL: {svc.uri}")
+        revision = (
+            svc.latest_ready_revision.split("/")[-1]
+            if svc.latest_ready_revision
+            else "unknown"
+        )
+        results.append(
+            f"{name} | Status: {status} | Revision: {revision} | URL: {svc.uri}"
+        )
 
     return "\n".join(results) if results else "No Cloud Run services found."

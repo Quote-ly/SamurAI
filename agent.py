@@ -1,22 +1,34 @@
-"""LangGraph agent wired to Vertex AI Gemini with GCP, GitHub, and VirtualDojo CRM tools."""
+"""LangGraph agent wired to Gemini with GCP, GitHub, VirtualDojo CRM, and memory tools."""
 
+import logging
 import os
+import time
 
 from langgraph.graph import StateGraph, MessagesState, START, END
 from langgraph.prebuilt import ToolNode
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_google_vertexai import ChatVertexAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from memory import get_checkpointer, create_memory_tools, retrieve_relevant_memories
 from tools.gcp_logging import query_cloud_logs
 from tools.gcp_monitoring import check_gcp_metrics
 from tools.gcp_cloudrun import list_cloud_run_services
 from tools.github import (
-    github_list_prs, github_get_pr_details, github_list_recent_commits,
-    github_list_issues, github_get_issue_details, github_create_issue,
-    github_list_workflow_runs, github_get_workflow_run_details,
+    github_list_prs,
+    github_get_pr_details,
+    github_list_recent_commits,
+    github_list_issues,
+    github_get_issue_details,
+    github_create_issue,
+    github_list_workflow_runs,
+    github_get_workflow_run_details,
+    PROJECT_TOOLS,
 )
 from tools.virtualdojo_mcp import create_virtualdojo_tool, create_virtualdojo_list_tools
+from tools.social_media import SOCIAL_TOOLS
+from tools.google_search import google_search
+
+logger = logging.getLogger(__name__)
 
 # Static tools — always available
 STATIC_TOOLS = [
@@ -31,7 +43,7 @@ STATIC_TOOLS = [
     github_create_issue,
     github_list_workflow_runs,
     github_get_workflow_run_details,
-]
+] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search]
 
 SYSTEM_PROMPT = (
     "You are SamurAI, a DevOps and CRM assistant in Microsoft Teams. "
@@ -44,6 +56,9 @@ SYSTEM_PROMPT = (
     "- virtualdojo-fedramp-prod (FedRAMP production environment)\n"
     "When the user mentions 'fedramp dev' or 'dev', use project_id='virtualdojo-fedramp-dev'. "
     "When they mention 'fedramp prod' or 'prod', use project_id='virtualdojo-fedramp-prod'. "
+    "When the user asks about Cloud Run services, logs, or metrics without specifying a project, "
+    "default to BOTH fedramp-dev and fedramp-prod. The team does not care about the samurai bot's own services. "
+    "Never query virtualdojo-samurai for Cloud Run services unless the user explicitly asks about the bot itself.\n"
     "Always use the exact project IDs above — never guess or construct project IDs.\n\n"
     "GitHub organization: Quote-ly\n"
     "IMPORTANT — You may ONLY access these GitHub repositories:\n"
@@ -60,7 +75,9 @@ SYSTEM_PROMPT = (
     "using the virtualdojo_crm tool. Use virtualdojo_list_tools to discover available operations. "
     "Common tool_name values: 'search_records', 'list_objects', 'describe_object', "
     "'create_record', 'update_record', 'get_record'. "
-    "If the user asks about CRM data and is not signed in, tell them to say 'connect to VirtualDojo' to authenticate.\n\n"
+    "If the user asks about CRM data and is not signed in, tell them to say 'connect to VirtualDojo' to authenticate. "
+    "NEVER generate or fabricate a login URL yourself. The bot will automatically provide the correct sign-in link "
+    "when the user says 'connect to VirtualDojo'.\n\n"
     "Deployment & Revision Intelligence:\n"
     "When analyzing Cloud Run logs after a deployment, always note the resource.labels.revision_name "
     "in the log filter to distinguish which revision errors come from. "
@@ -73,32 +90,101 @@ SYSTEM_PROMPT = (
     "then filter logs by that revision.\n\n"
     "Each message includes the user's name and timezone in brackets at the start. "
     "Use their timezone when displaying times — convert UTC timestamps to their local time. "
-    "For example, if the user is in America/New_York, show times in ET."
+    "For example, if the user is in America/New_York, show times in ET.\n\n"
+    "Social Media (LinkedIn, X/Twitter, and more):\n"
+    "You can draft, preview, schedule, and publish social media posts via Ayrshare.\n"
+    "Available platforms: linkedin, twitter, facebook, instagram, tiktok, bluesky, "
+    "threads, pinterest, reddit, youtube, telegram, snapchat, gmb.\n"
+    "You can also generate images for posts using AI image generation.\n\n"
+    "CRITICAL SOCIAL MEDIA RULES:\n"
+    "1. ALWAYS call social_preview_post first to show the user a preview before posting.\n"
+    "2. NEVER call social_publish_post or social_schedule_post unless the user explicitly confirms "
+    "with words like 'approve', 'post it', 'looks good', 'yes', 'confirmed', or 'send it'.\n"
+    "3. If the user wants changes, create a new preview with the edits.\n"
+    "4. Only Cyrus and Devin are authorized to use social media tools.\n"
+    "5. When generating images, incorporate VirtualDojo brand colors (terra cotta #B84A3C, "
+    "black #1A1A1A) and clean, modern visual style.\n"
+    "6. Social media tools require conversation_id and user_email parameters — "
+    "pass these from the context provided in each message.\n\n"
+    "IMPORTANT: When calling social media tools that accept a conversation_id parameter, "
+    "ALWAYS pass the conversation_id from the context brackets at the start of the message.\n\n"
+    "VirtualDojo Brand Voice (for drafting social media posts):\n"
+    "- Tone: 'Strategic Rowdiness' — conversational, authoritative, candid GovCon insider\n"
+    "- Lead with real scenarios and pain points, not feature lists\n"
+    "- Short punchy paragraphs, rhetorical questions OK\n"
+    "- Back claims with specifics (contract vehicles, percentages, real numbers)\n"
+    "- Hashtags: #GovCon #GovernmentContracting #CMMC #FedRAMP #SEWP #NIST\n"
+    "- X handle: @Virtualdojo_gov\n"
+    "- NEVER say 'FedRAMP authorized' — say 'pursuing FedRAMP Moderate authorization'\n"
+    "- NEVER say '100%' accuracy — say '99.9%+'\n"
+    "- NEVER use generic SaaS speak or forced enthusiasm\n"
+    "- NEVER use em dashes (—) in social media posts. Use periods, commas, or line breaks instead.\n\n"
+    "Long-term Memory:\n"
+    "You have a persistent memory system that survives across conversations and restarts.\n"
+    "- Use save_memory to remember important facts: user preferences, project context, "
+    "key decisions, team information, or anything valuable for future conversations.\n"
+    "- Use recall_memories to search for relevant past context when needed.\n"
+    "- Relevant memories are automatically retrieved and shown when available.\n"
+    "- Save memories proactively when users share important context or preferences.\n"
+    "- Do NOT save trivial or transient information (e.g., 'user asked about logs').\n\n"
+    "GitHub Projects:\n"
+    "You can manage GitHub Projects V2 in the Quote-ly organization.\n"
+    "- github_list_projects: List all projects\n"
+    "- github_get_project_items: View items with their Status, Priority, and other fields\n"
+    "- github_create_draft_issue: Create a new draft item in a project\n"
+    "- github_add_item_to_project: Add an existing issue/PR to a project\n"
+    "- github_update_item_field: Change Status, Priority, or other fields on an item\n"
+    "When updating fields, first use github_get_project_items to see available field values.\n\n"
+    "Google Search:\n"
+    "You have a google_search tool that can search the web.\n"
+    "ONLY use this tool when the user explicitly asks you to search, google something, "
+    "or look something up online. Examples: 'search for...', 'google...', 'look up...', "
+    "'what's the latest on...'. Do NOT use it proactively or to answer questions you "
+    "already know the answer to."
 )
 
 
-def _build_graph(user_id: str = "default"):
-    """Build a LangGraph agent with user-specific CRM tools."""
-    llm = ChatVertexAI(
-        model_name="gemini-3-flash-preview",
+async def _build_graph(user_id: str = "default"):
+    """Build a LangGraph agent with user-specific CRM and memory tools."""
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-3-flash-preview",
         project=os.environ.get("GCP_PROJECT_ID"),
         location="global",
+        vertexai=True,
     )
 
-    # Combine static tools with user-specific VirtualDojo tools
-    user_tools = STATIC_TOOLS + [
-        create_virtualdojo_tool(user_id),
-        create_virtualdojo_list_tools(user_id),
-    ]
+    # Combine static tools with user-specific VirtualDojo + memory tools
+    user_tools = (
+        STATIC_TOOLS
+        + [
+            create_virtualdojo_tool(user_id),
+            create_virtualdojo_list_tools(user_id),
+        ]
+        + create_memory_tools(user_id)
+    )
 
     llm_with_tools = llm.bind_tools(user_tools)
-    tool_node = ToolNode(user_tools)
+    tool_node = ToolNode(user_tools, handle_tool_errors=True)
 
-    def call_model(state: MessagesState):
+    async def call_model(state: MessagesState):
         messages = state["messages"]
+
+        # Build system prompt, injecting any relevant long-term memories
+        system_content = SYSTEM_PROMPT
+        last_human = next(
+            (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
+        )
+        if last_human:
+            memory_context = await retrieve_relevant_memories(
+                user_id, last_human.content
+            )
+            if memory_context:
+                system_content += f"\n\n{memory_context}"
+
         if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=SYSTEM_PROMPT)] + messages
-        return {"messages": [llm_with_tools.invoke(messages)]}
+            messages = [SystemMessage(content=system_content)] + messages
+
+        return {"messages": [await llm_with_tools.ainvoke(messages)]}
 
     def should_continue(state: MessagesState):
         last = state["messages"][-1]
@@ -113,26 +199,51 @@ def _build_graph(user_id: str = "default"):
     graph.add_conditional_edges("agent", should_continue)
     graph.add_edge("tools", "agent")
 
-    memory = MemorySaver()
-    return graph.compile(checkpointer=memory)
+    checkpointer = await get_checkpointer()
+    return graph.compile(checkpointer=checkpointer)
 
 
 # Cache of per-user graphs to avoid rebuilding on every message
 _user_graphs: dict[str, object] = {}
 
 
-def _get_graph(user_id: str):
+async def _get_graph(user_id: str):
     """Get or create a LangGraph agent for a specific user."""
     if user_id not in _user_graphs:
-        _user_graphs[user_id] = _build_graph(user_id)
+        _user_graphs[user_id] = await _build_graph(user_id)
     return _user_graphs[user_id]
+
+
+def reset_user_graph(user_id: str):
+    """Reset a user's graph to pick up new tools (e.g. after OAuth)."""
+    _user_graphs.pop(user_id, None)
+
+
+async def inject_auth_message(user_id: str, conversation_id: str):
+    """Inject a message into the conversation history confirming CRM auth succeeded."""
+    graph = await _get_graph(user_id)
+    config = {"configurable": {"thread_id": conversation_id}}
+    await graph.ainvoke(
+        {
+            "messages": [
+                HumanMessage(
+                    content="[SYSTEM: The user has successfully authenticated with VirtualDojo CRM. "
+                    "The connection is now active. You can now use virtualdojo_crm and "
+                    "virtualdojo_list_tools to access their CRM data. "
+                    "Do NOT ask the user to connect again.]"
+                )
+            ]
+        },
+        config=config,
+    )
 
 
 def _extract_text(content) -> str:
     """Extract plain text from Gemini's content blocks."""
     if isinstance(content, list):
         return "\n".join(
-            block.get("text", "") for block in content
+            block.get("text", "")
+            for block in content
             if isinstance(block, dict) and block.get("type") == "text"
         )
     return content
@@ -144,18 +255,27 @@ async def run_agent(
     user_id: str = "default",
     user_name: str = "",
     user_timezone: str = "",
+    user_email: str = "",
 ) -> str:
+    start = time.time()
+
     # Build context prefix so the LLM knows who it's talking to
     context_parts = []
     if user_name:
         context_parts.append(f"User: {user_name}")
+    if user_email:
+        context_parts.append(f"Email: {user_email}")
+    context_parts.append(f"conversation_id: {conversation_id}")
     if user_timezone:
         from datetime import datetime
         import zoneinfo
+
         try:
             tz = zoneinfo.ZoneInfo(user_timezone)
             local_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
-            context_parts.append(f"Timezone: {user_timezone} (current time: {local_time})")
+            context_parts.append(
+                f"Timezone: {user_timezone} (current time: {local_time})"
+            )
         except Exception:
             context_parts.append(f"Timezone: {user_timezone}")
 
@@ -163,10 +283,18 @@ async def run_agent(
     if context_parts:
         message = f"[{' | '.join(context_parts)}]\n{user_message}"
 
-    graph = _get_graph(user_id)
+    graph = await _get_graph(user_id)
     config = {"configurable": {"thread_id": conversation_id}}
     result = await graph.ainvoke(
         {"messages": [HumanMessage(content=message)]},
         config=config,
     )
-    return _extract_text(result["messages"][-1].content)
+
+    elapsed = time.time() - start
+    logger.info("[run_agent] user=%s elapsed=%.2fs", user_name or user_id, elapsed)
+
+    messages = result.get("messages", [])
+    if not messages:
+        logger.error("[run_agent] empty messages in result for thread=%s", conversation_id)
+        return "I wasn't able to generate a response. Please try again."
+    return _extract_text(messages[-1].content)

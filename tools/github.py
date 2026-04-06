@@ -3,27 +3,58 @@
 import os
 import time
 
+import httpx
 from langchain_core.tools import tool
 
+GITHUB_ORG = "Quote-ly"
 
-def _github():
-    """Authenticate as a GitHub App installation and return a Github client."""
-    import jwt
-    from github import Github, GithubIntegration
+# Cache the token to avoid re-generating on every tool call within a request
+_token_cache: dict = {"token": None, "expires_at": 0}
+
+
+def _github_token() -> str:
+    """Get a GitHub App installation access token (cached)."""
+    from github import GithubIntegration
+
+    now = time.time()
+    if _token_cache["token"] and _token_cache["expires_at"] > now + 60:
+        return _token_cache["token"]
 
     app_id = os.environ["GITHUB_APP_ID"]
     private_key = os.environ["GITHUB_APP_PRIVATE_KEY"]
 
     integration = GithubIntegration(app_id, private_key)
-
-    # Get the installation for the Quote-ly org
     installations = integration.get_installations()
     if not installations:
         raise RuntimeError("GitHub App is not installed on any organization.")
 
-    installation_id = installations[0].id
-    access_token = integration.get_access_token(installation_id).token
-    return Github(access_token)
+    access = integration.get_access_token(installations[0].id)
+    _token_cache["token"] = access.token
+    _token_cache["expires_at"] = access.expires_at.timestamp() if access.expires_at else now + 3600
+    return access.token
+
+
+def _github():
+    """Authenticate as a GitHub App installation and return a Github client."""
+    from github import Github
+
+    return Github(_github_token())
+
+
+def _graphql(query: str, variables: dict | None = None) -> dict:
+    """Execute a GitHub GraphQL query."""
+    resp = httpx.post(
+        "https://api.github.com/graphql",
+        json={"query": query, "variables": variables or {}},
+        headers={"Authorization": f"Bearer {_github_token()}"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if "errors" in data:
+        msgs = "; ".join(e.get("message", str(e)) for e in data["errors"])
+        raise RuntimeError(f"GraphQL error: {msgs}")
+    return data["data"]
 
 
 @tool
@@ -227,3 +258,351 @@ def github_get_workflow_run_details(repo: str, run_id: int) -> str:
                         result += f"\n    FAILED step: {step.name}"
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# GitHub Projects V2 tools (GraphQL)
+# ---------------------------------------------------------------------------
+
+@tool
+def github_list_projects() -> str:
+    """List all GitHub Projects in the Quote-ly organization."""
+    data = _graphql(
+        """
+        query($org: String!) {
+          organization(login: $org) {
+            projectsV2(first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+              nodes { number title shortDescription closed url }
+            }
+          }
+        }
+        """,
+        {"org": GITHUB_ORG},
+    )
+    projects = data["organization"]["projectsV2"]["nodes"]
+    if not projects:
+        return "No projects found."
+    lines = []
+    for p in projects:
+        status = "closed" if p["closed"] else "open"
+        desc = f" — {p['shortDescription']}" if p.get("shortDescription") else ""
+        lines.append(f"#{p['number']} {p['title']} ({status}){desc}")
+    return "\n".join(lines)
+
+
+@tool
+def github_get_project_items(project_number: int, count: int = 20) -> str:
+    """List items (issues, PRs, drafts) in a GitHub Project with their field values.
+
+    Args:
+        project_number: The project number (e.g. 1, 2).
+        count: Number of items to return (default 20, max 100).
+    """
+    count = min(count, 100)
+    data = _graphql(
+        """
+        query($org: String!, $num: Int!, $count: Int!) {
+          organization(login: $org) {
+            projectV2(number: $num) {
+              title
+              fields(first: 30) {
+                nodes {
+                  ... on ProjectV2SingleSelectField { id name options { id name } }
+                  ... on ProjectV2Field { id name }
+                  ... on ProjectV2IterationField { id name }
+                }
+              }
+              items(first: $count, orderBy: {field: POSITION, direction: ASC}) {
+                nodes {
+                  id
+                  fieldValues(first: 15) {
+                    nodes {
+                      ... on ProjectV2ItemFieldSingleSelectValue {
+                        name
+                        field { ... on ProjectV2SingleSelectField { name } }
+                      }
+                      ... on ProjectV2ItemFieldTextValue {
+                        text
+                        field { ... on ProjectV2Field { name } }
+                      }
+                      ... on ProjectV2ItemFieldNumberValue {
+                        number
+                        field { ... on ProjectV2Field { name } }
+                      }
+                      ... on ProjectV2ItemFieldDateValue {
+                        date
+                        field { ... on ProjectV2Field { name } }
+                      }
+                      ... on ProjectV2ItemFieldIterationValue {
+                        title
+                        field { ... on ProjectV2IterationField { name } }
+                      }
+                    }
+                  }
+                  content {
+                    ... on Issue { title number state url }
+                    ... on PullRequest { title number state url }
+                    ... on DraftIssue { title body }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """,
+        {"org": GITHUB_ORG, "num": project_number, "count": count},
+    )
+    project = data["organization"]["projectV2"]
+    items = project["items"]["nodes"]
+    if not items:
+        return f"No items in project '{project['title']}'."
+
+    lines = [f"Project: {project['title']} ({len(items)} items)\n"]
+    for item in items:
+        content = item.get("content") or {}
+        title = content.get("title", "(draft)")
+        number = content.get("number")
+        state = content.get("state", "")
+
+        label = f"#{number} " if number else ""
+        state_str = f" [{state}]" if state else ""
+
+        # Collect field values
+        fields = []
+        for fv in item["fieldValues"]["nodes"]:
+            fname = ""
+            fval = ""
+            if "name" in fv and "field" in fv:
+                fname = fv["field"].get("name", "")
+                fval = fv["name"]
+            elif "text" in fv and "field" in fv:
+                fname = fv["field"].get("name", "")
+                fval = fv["text"]
+            elif "number" in fv and "field" in fv:
+                fname = fv["field"].get("name", "")
+                fval = str(fv["number"])
+            elif "date" in fv and "field" in fv:
+                fname = fv["field"].get("name", "")
+                fval = fv["date"]
+            elif "title" in fv and "field" in fv:
+                fname = fv["field"].get("name", "")
+                fval = fv["title"]
+            if fname and fval:
+                fields.append(f"{fname}: {fval}")
+
+        field_str = f" | {', '.join(fields)}" if fields else ""
+        lines.append(f"- {label}{title}{state_str}{field_str}")
+        lines.append(f"  item_id: {item['id']}")
+
+    return "\n".join(lines)
+
+
+@tool
+def github_create_draft_issue(
+    project_number: int, title: str, body: str = ""
+) -> str:
+    """Create a new draft issue in a GitHub Project.
+
+    Args:
+        project_number: The project number.
+        title: Title for the draft issue.
+        body: Optional body/description.
+    """
+    # First get the project node ID
+    data = _graphql(
+        """
+        query($org: String!, $num: Int!) {
+          organization(login: $org) {
+            projectV2(number: $num) { id title }
+          }
+        }
+        """,
+        {"org": GITHUB_ORG, "num": project_number},
+    )
+    project_id = data["organization"]["projectV2"]["id"]
+
+    result = _graphql(
+        """
+        mutation($projectId: ID!, $title: String!, $body: String) {
+          addProjectV2DraftIssue(input: {
+            projectId: $projectId
+            title: $title
+            body: $body
+          }) {
+            projectItem { id }
+          }
+        }
+        """,
+        {"projectId": project_id, "title": title, "body": body or None},
+    )
+    item_id = result["addProjectV2DraftIssue"]["projectItem"]["id"]
+    return f"Created draft issue '{title}' in project (item_id: {item_id})"
+
+
+@tool
+def github_add_item_to_project(project_number: int, repo: str, issue_number: int) -> str:
+    """Add an existing issue or PR to a GitHub Project.
+
+    Args:
+        project_number: The project number.
+        repo: Repository in 'owner/repo' format.
+        issue_number: The issue or PR number to add.
+    """
+    # Get project ID
+    data = _graphql(
+        """
+        query($org: String!, $num: Int!) {
+          organization(login: $org) {
+            projectV2(number: $num) { id title }
+          }
+        }
+        """,
+        {"org": GITHUB_ORG, "num": project_number},
+    )
+    project_id = data["organization"]["projectV2"]["id"]
+
+    # Get issue/PR node ID
+    owner, name = repo.split("/")
+    data = _graphql(
+        """
+        query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            issueOrPullRequest(number: $number) {
+              ... on Issue { id title }
+              ... on PullRequest { id title }
+            }
+          }
+        }
+        """,
+        {"owner": owner, "name": name, "number": issue_number},
+    )
+    content = data["repository"]["issueOrPullRequest"]
+    if not content:
+        return f"Issue/PR #{issue_number} not found in {repo}."
+
+    result = _graphql(
+        """
+        mutation($projectId: ID!, $contentId: ID!) {
+          addProjectV2ItemById(input: {
+            projectId: $projectId
+            contentId: $contentId
+          }) {
+            item { id }
+          }
+        }
+        """,
+        {"projectId": project_id, "contentId": content["id"]},
+    )
+    item_id = result["addProjectV2ItemById"]["item"]["id"]
+    return f"Added '{content['title']}' to project (item_id: {item_id})"
+
+
+@tool
+def github_update_item_field(
+    project_number: int, item_id: str, field_name: str, value: str
+) -> str:
+    """Update a field value on a project item (e.g. Status, Priority).
+
+    Args:
+        project_number: The project number.
+        item_id: The project item ID (from github_get_project_items output).
+        field_name: The field name to update (e.g. 'Status', 'Priority').
+        value: The value to set (must match an existing option for single-select fields).
+    """
+    # Get project ID and field definitions
+    data = _graphql(
+        """
+        query($org: String!, $num: Int!) {
+          organization(login: $org) {
+            projectV2(number: $num) {
+              id
+              fields(first: 30) {
+                nodes {
+                  ... on ProjectV2SingleSelectField {
+                    id name options { id name }
+                  }
+                  ... on ProjectV2Field { id name dataType }
+                }
+              }
+            }
+          }
+        }
+        """,
+        {"org": GITHUB_ORG, "num": project_number},
+    )
+    project = data["organization"]["projectV2"]
+    project_id = project["id"]
+
+    # Find the field
+    target_field = None
+    for field in project["fields"]["nodes"]:
+        if field.get("name", "").lower() == field_name.lower():
+            target_field = field
+            break
+
+    if not target_field:
+        available = [f["name"] for f in project["fields"]["nodes"] if f.get("name")]
+        return f"Field '{field_name}' not found. Available fields: {', '.join(available)}"
+
+    field_id = target_field["id"]
+
+    # For single-select fields, find the option ID
+    if "options" in target_field:
+        option = next(
+            (o for o in target_field["options"] if o["name"].lower() == value.lower()),
+            None,
+        )
+        if not option:
+            available = [o["name"] for o in target_field["options"]]
+            return f"Value '{value}' not found for '{field_name}'. Options: {', '.join(available)}"
+
+        _graphql(
+            """
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId
+                itemId: $itemId
+                fieldId: $fieldId
+                value: { singleSelectOptionId: $optionId }
+              }) { projectV2Item { id } }
+            }
+            """,
+            {
+                "projectId": project_id,
+                "itemId": item_id,
+                "fieldId": field_id,
+                "optionId": option["id"],
+            },
+        )
+        return f"Updated '{field_name}' to '{option['name']}'"
+
+    # For text fields
+    _graphql(
+        """
+        mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $text: String!) {
+          updateProjectV2ItemFieldValue(input: {
+            projectId: $projectId
+            itemId: $itemId
+            fieldId: $fieldId
+            value: { text: $text }
+          }) { projectV2Item { id } }
+        }
+        """,
+        {
+            "projectId": project_id,
+            "itemId": item_id,
+            "fieldId": field_id,
+            "text": value,
+        },
+    )
+    return f"Updated '{field_name}' to '{value}'"
+
+
+# All project tools for easy import
+PROJECT_TOOLS = [
+    github_list_projects,
+    github_get_project_items,
+    github_create_draft_issue,
+    github_add_item_to_project,
+    github_update_item_field,
+]

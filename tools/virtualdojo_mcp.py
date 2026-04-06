@@ -7,7 +7,6 @@ import secrets
 import os
 import time
 import logging
-from typing import Any
 
 import httpx
 from langchain_core.tools import StructuredTool
@@ -183,8 +182,8 @@ def get_login_url(user_id: str) -> str | None:
     return f"_pending:{user_id}"
 
 
-async def start_oauth_flow(user_id: str) -> str:
-    """Start the OAuth flow and return the authorize URL."""
+async def start_oauth_flow(user_id: str) -> tuple[str, str]:
+    """Start the OAuth flow and return (authorize_url, state)."""
     creds = await _ensure_client_registered()
     verifier, challenge = _generate_pkce()
     state = secrets.token_urlsafe(32)
@@ -205,14 +204,16 @@ async def start_oauth_flow(user_id: str) -> str:
         "state": state,
     }
     query = "&".join(f"{k}={v}" for k, v in params.items())
-    return f"{MCP_URL}/oauth/authorize?{query}"
+    return f"{MCP_URL}/oauth/authorize?{query}", state
 
 
 async def exchange_code(code: str, state: str) -> dict | None:
     """Exchange an OAuth authorization code for tokens."""
     flow = _pending_auth.pop(state, None)
     if not flow:
+        print(f"[oauth] exchange_code: NO pending auth for state={state[:8]}..., pending_keys={list(_pending_auth.keys())[:5]}", flush=True)
         return None
+    print(f"[oauth] exchange_code: found flow for user_id={flow['user_id']}", flush=True)
 
     creds = await _ensure_client_registered()
     try:
@@ -239,6 +240,7 @@ async def exchange_code(code: str, state: str) -> dict | None:
         "refresh_token": tokens.get("refresh_token"),
         "expires_at": time.time() + tokens.get("expires_in", 1800),
     }
+    print(f"[oauth] Token stored for user_id={flow['user_id']}, store_keys={list(_token_store.keys())}", flush=True)
     return tokens
 
 
@@ -293,7 +295,9 @@ async def _get_access_token(user_id: str) -> str | None:
 
 def is_user_authenticated(user_id: str) -> bool:
     """Check if a user has stored tokens."""
-    return user_id in _token_store
+    result = user_id in _token_store
+    print(f"[oauth] is_user_authenticated({user_id[:20]}...)={result}, store_keys={list(_token_store.keys())[:3]}", flush=True)
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -8,23 +8,38 @@ import pytest
 
 @pytest.fixture
 def mock_llm():
-    """Patch ChatVertexAI before importing agent so _build_graph() doesn't hit Vertex."""
-    with patch("langchain_google_vertexai.ChatVertexAI") as mock_cls:
+    """Patch ChatGoogleGenerativeAI and memory deps before importing agent."""
+    with (
+        patch("langchain_google_genai.ChatGoogleGenerativeAI") as mock_cls,
+        patch("memory.get_checkpointer", new_callable=AsyncMock) as mock_ckpt,
+        patch(
+            "memory.retrieve_relevant_memories",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("memory.create_memory_tools", return_value=[]),
+    ):
         mock_instance = MagicMock()
         mock_instance.bind_tools.return_value = mock_instance
-        mock_instance.invoke.return_value = MagicMock(
-            content="Hello from SamurAI!", tool_calls=[]
+        mock_instance.ainvoke = AsyncMock(
+            return_value=MagicMock(content="Hello from SamurAI!", tool_calls=[])
         )
         mock_cls.return_value = mock_instance
-        # Force reimport so _build_graph() picks up the mock
+
+        from langgraph.checkpoint.memory import MemorySaver
+
+        mock_ckpt.return_value = MemorySaver()
+
         import agent
+
         importlib.reload(agent)
+        agent._user_graphs.clear()
         yield mock_instance, agent
 
 
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
-    assert len(agent.STATIC_TOOLS) == 11
+    assert len(agent.STATIC_TOOLS) == 25
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -37,6 +52,17 @@ def test_static_tools_list(mock_llm):
     assert "github_create_issue" in tool_names
     assert "github_list_workflow_runs" in tool_names
     assert "github_get_workflow_run_details" in tool_names
+    # Social media tools
+    assert "social_generate_image" in tool_names
+    assert "social_preview_post" in tool_names
+    assert "social_publish_post" in tool_names
+    assert "social_schedule_post" in tool_names
+    assert "social_list_scheduled" in tool_names
+    assert "social_get_post" in tool_names
+    assert "social_update_post" in tool_names
+    assert "social_delete_post" in tool_names
+    # Google search
+    assert "google_search" in tool_names
 
 
 def test_system_prompt_defined(mock_llm):
@@ -44,17 +70,18 @@ def test_system_prompt_defined(mock_llm):
     assert "SamurAI" in agent.SYSTEM_PROMPT
     assert "DevOps" in agent.SYSTEM_PROMPT
     assert "VirtualDojo CRM" in agent.SYSTEM_PROMPT
+    assert "Long-term Memory" in agent.SYSTEM_PROMPT
+    assert "save_memory" in agent.SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio
 async def test_run_agent_returns_final_message(mock_llm):
     _, agent = mock_llm
-    # Patch the per-user graph
     mock_graph = MagicMock()
     mock_graph.ainvoke = AsyncMock(
         return_value={"messages": [MagicMock(content="Here are your logs.")]}
     )
-    agent._get_graph = MagicMock(return_value=mock_graph)
+    agent._get_graph = AsyncMock(return_value=mock_graph)
 
     result = await agent.run_agent("show me recent errors")
     assert result == "Here are your logs."
@@ -67,14 +94,38 @@ async def test_run_agent_passes_human_message(mock_llm):
     mock_graph.ainvoke = AsyncMock(
         return_value={"messages": [MagicMock(content="ok")]}
     )
-    agent._get_graph = MagicMock(return_value=mock_graph)
+    agent._get_graph = AsyncMock(return_value=mock_graph)
 
     await agent.run_agent("check cloud run services")
 
     call_args = mock_graph.ainvoke.call_args[0][0]
     messages = call_args["messages"]
     assert len(messages) == 1
-    assert messages[0].content == "check cloud run services"
+    assert "check cloud run services" in messages[0].content
+
+
+@pytest.mark.asyncio
+async def test_run_agent_includes_user_context(mock_llm):
+    _, agent = mock_llm
+    mock_graph = MagicMock()
+    mock_graph.ainvoke = AsyncMock(
+        return_value={"messages": [MagicMock(content="ok")]}
+    )
+    agent._get_graph = AsyncMock(return_value=mock_graph)
+
+    await agent.run_agent(
+        "hello",
+        conversation_id="conv-1",
+        user_id="u-1",
+        user_name="Alice",
+        user_email="alice@test.com",
+    )
+
+    call_args = mock_graph.ainvoke.call_args[0][0]
+    message_text = call_args["messages"][0].content
+    assert "User: Alice" in message_text
+    assert "Email: alice@test.com" in message_text
+    assert "conversation_id: conv-1" in message_text
 
 
 @pytest.mark.asyncio
@@ -82,9 +133,59 @@ async def test_run_agent_graph_routes_to_end_without_tools(mock_llm):
     """Full integration: LLM returns no tool_calls → graph goes straight to END."""
     llm_mock, agent = mock_llm
 
-    # LLM returns a message with no tool calls
     from langchain_core.messages import AIMessage
-    llm_mock.invoke.return_value = AIMessage(content="All good, no tools needed.")
+
+    llm_mock.ainvoke.return_value = AIMessage(content="All good, no tools needed.")
 
     result = await agent.run_agent("how are things?")
     assert result == "All good, no tools needed."
+
+
+@pytest.mark.asyncio
+async def test_inject_auth_message(mock_llm):
+    _, agent = mock_llm
+    mock_graph = MagicMock()
+    mock_graph.ainvoke = AsyncMock(
+        return_value={"messages": [MagicMock(content="ok")]}
+    )
+    agent._get_graph = AsyncMock(return_value=mock_graph)
+
+    await agent.inject_auth_message("user-1", "conv-1")
+
+    call_args = mock_graph.ainvoke.call_args[0][0]
+    msg = call_args["messages"][0].content
+    assert "authenticated with VirtualDojo CRM" in msg
+
+
+@pytest.mark.asyncio
+async def test_get_graph_caches_per_user(mock_llm):
+    _, agent = mock_llm
+    agent._user_graphs.clear()
+
+    graph1 = await agent._get_graph("user-a")
+    graph2 = await agent._get_graph("user-a")
+    graph3 = await agent._get_graph("user-b")
+
+    assert graph1 is graph2  # Same user → same graph
+    assert graph1 is not graph3  # Different user → different graph
+
+
+def test_reset_user_graph(mock_llm):
+    _, agent = mock_llm
+    agent._user_graphs["user-x"] = "some_graph"
+    agent.reset_user_graph("user-x")
+    assert "user-x" not in agent._user_graphs
+
+
+def test_extract_text_from_string(mock_llm):
+    _, agent = mock_llm
+    assert agent._extract_text("hello") == "hello"
+
+
+def test_extract_text_from_content_blocks(mock_llm):
+    _, agent = mock_llm
+    blocks = [
+        {"type": "text", "text": "line 1"},
+        {"type": "text", "text": "line 2"},
+    ]
+    assert agent._extract_text(blocks) == "line 1\nline 2"
