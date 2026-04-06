@@ -39,7 +39,7 @@ def mock_llm():
 
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
-    assert len(agent.STATIC_TOOLS) == 60
+    assert len(agent.STATIC_TOOLS) == 64
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -87,6 +87,11 @@ def test_static_tools_list(mock_llm):
     assert "oscal_validate_package" in tool_names
     assert "oscal_catalog_lookup" in tool_names
     assert "oscal_render_pdf" in tool_names
+    # Repo sync tools
+    assert "sync_repo" in tool_names
+    assert "read_repo_file" in tool_names
+    assert "search_repo_code" in tool_names
+    assert "list_repo_files" in tool_names
 
 
 def test_system_prompt_defined(mock_llm):
@@ -121,6 +126,20 @@ def test_needs_pro_model_for_oscal(mock_llm):
     assert agent._needs_pro_model([HumanMessage(content="render PDF of the SSP")])
     assert agent._needs_pro_model([HumanMessage(content="propose edit to the IR plan")])
     assert agent._needs_pro_model([HumanMessage(content="look up control AC-2")])
+
+
+def test_needs_pro_model_for_troubleshooting(mock_llm):
+    _, agent = mock_llm
+    from langchain_core.messages import HumanMessage
+
+    assert agent._needs_pro_model([HumanMessage(content="troubleshoot the 500 errors on prod")])
+    assert agent._needs_pro_model([HumanMessage(content="debug the auth failure in the API")])
+    assert agent._needs_pro_model([HumanMessage(content="why is the deployment failing?")])
+    assert agent._needs_pro_model([HumanMessage(content="investigate the timeout errors")])
+    assert agent._needs_pro_model([HumanMessage(content="diagnose the memory leak")])
+    assert agent._needs_pro_model([HumanMessage(content="the API is broken, what's wrong?")])
+    assert agent._needs_pro_model([HumanMessage(content="analyze code in config.py for the bug")])
+    assert agent._needs_pro_model([HumanMessage(content="I see a traceback in the logs")])
 
 
 def test_needs_flash_model_for_simple_queries(mock_llm):

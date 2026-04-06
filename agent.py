@@ -32,6 +32,7 @@ from tools.teams_messaging import TEAMS_MESSAGING_TOOLS
 from tools.fedramp import FEDRAMP_TOOLS
 from tools.fedramp_docs import FEDRAMP_DOC_TOOLS
 from tools.fedramp_oscal import FEDRAMP_OSCAL_TOOLS
+from tools.repo_sync import REPO_SYNC_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ STATIC_TOOLS = [
     github_create_issue,
     github_list_workflow_runs,
     github_get_workflow_run_details,
-] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search] + BACKGROUND_TASK_TOOLS + TEAMS_MESSAGING_TOOLS + FEDRAMP_TOOLS + FEDRAMP_DOC_TOOLS + FEDRAMP_OSCAL_TOOLS
+] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search] + BACKGROUND_TASK_TOOLS + TEAMS_MESSAGING_TOOLS + FEDRAMP_TOOLS + FEDRAMP_DOC_TOOLS + FEDRAMP_OSCAL_TOOLS + REPO_SYNC_TOOLS
 
 SYSTEM_PROMPT = (
     "You are SamurAI, a DevOps and CRM assistant in Microsoft Teams. "
@@ -257,18 +258,39 @@ SYSTEM_PROMPT = (
     "Code Review Against FedRAMP:\n"
     "Use fedramp_review_code to check source files against:\n"
     "SC-7 (CORS), SC-12 (hardcoded creds), CM-6 (error handling), SC-18 (XSS), AC-8 (login banner).\n"
-    "NEVER say 'FedRAMP authorized' — say 'pursuing FedRAMP Moderate authorization'."
+    "NEVER say 'FedRAMP authorized' — say 'pursuing FedRAMP Moderate authorization'.\n\n"
+    "Code Troubleshooting & Repo Access:\n"
+    "You can sync and read source code from whitelisted GitHub repos locally.\n"
+    "Tools: sync_repo, read_repo_file, search_repo_code, list_repo_files.\n\n"
+    "TROUBLESHOOTING WORKFLOW:\n"
+    "1. Determine which environment has the issue: production (main branch) or dev (development branch).\n"
+    "2. Call sync_repo to ensure you have the latest code for that branch.\n"
+    "3. Use search_repo_code to find relevant code (error messages, function names, config).\n"
+    "4. Use read_repo_file to read the full source files you need.\n"
+    "5. Cross-reference with logs (query_cloud_logs) and service status (list_cloud_run_services).\n\n"
+    "Branch mapping:\n"
+    "- Production issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='main')\n"
+    "- Development issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='development')\n"
+    "- Bot issues: sync_repo(repo='Quote-ly/SamurAI', branch='main')\n"
+    "Always sync before reading code — the local copy may be stale.\n"
+    "When troubleshooting, read the actual code, don't guess at what it does."
 )
 
 
 # Keywords that trigger the Pro model for complex reasoning
 PRO_MODEL_KEYWORDS = [
+    # OSCAL & FedRAMP document work
     "oscal", "generate ssp", "generate poam", "assessment results",
     "migrate", "update control", "link evidence", "validate package",
     "render pdf", "review code", "fedramp_review_code",
     "propose edit", "commit document", "fedramp document",
     "update ssp", "update the ssp", "control implementation",
     "catalog lookup", "look up control",
+    # Code troubleshooting & analysis
+    "troubleshoot", "debug", "why is", "root cause", "stack trace",
+    "traceback", "exception", "bug", "broken", "not working",
+    "investigate", "diagnose", "analyze code", "code review",
+    "what's wrong", "error in", "fix the", "failing",
 ]
 
 

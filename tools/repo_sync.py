@@ -1,0 +1,319 @@
+"""Local repo sync tools — shallow clone repos to /tmp for fast code reading and search."""
+
+import logging
+import os
+import subprocess
+
+from langchain_core.tools import tool
+
+logger = logging.getLogger(__name__)
+
+REPO_BASE_DIR = "/tmp/repos"
+
+ALLOWED_REPOS = {
+    "Quote-ly/quotely-data-service",
+    "Quote-ly/virtualdojo_cli",
+    "Quote-ly/SamurAI",
+    "Quote-ly/Fedramp",
+}
+
+
+def _repo_dir(repo: str, branch: str) -> str:
+    """Return the local directory path for a repo+branch."""
+    repo_name = repo.split("/")[-1]
+    return os.path.join(REPO_BASE_DIR, repo_name, branch)
+
+
+def _get_remote_sha(repo: str, branch: str) -> str | None:
+    """Get the latest commit SHA for a branch from GitHub via git ls-remote."""
+    from tools.github import _github_token
+
+    token = _github_token()
+    url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", url, f"refs/heads/{branch}"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().split()[0]
+    except Exception as e:
+        logger.error("ls-remote failed for %s/%s: %s", repo, branch, e)
+    return None
+
+
+def _get_local_sha(repo_dir: str) -> str | None:
+    """Get the HEAD SHA of a local repo clone."""
+    head_file = os.path.join(repo_dir, ".git", "HEAD")
+    if not os.path.exists(head_file):
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=repo_dir,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+@tool
+def sync_repo(
+    repo: str = "Quote-ly/quotely-data-service",
+    branch: str = "main",
+) -> str:
+    """Sync a GitHub repo branch to a local copy for code reading and search.
+
+    Performs a shallow clone if no local copy exists, or pulls latest if
+    the remote has new commits. Skips if already up to date.
+
+    Args:
+        repo: Repository in 'owner/repo' format. Must be a whitelisted repo.
+        branch: Branch name to sync (e.g. 'main', 'development').
+    """
+    if repo not in ALLOWED_REPOS:
+        allowed = ", ".join(sorted(ALLOWED_REPOS))
+        return f"Error: '{repo}' is not a whitelisted repo. Allowed: {allowed}"
+
+    from tools.github import _github_token
+
+    token = _github_token()
+    clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+    local_dir = _repo_dir(repo, branch)
+
+    # Check if we need to sync
+    remote_sha = _get_remote_sha(repo, branch)
+    if not remote_sha:
+        return f"Error: Could not reach {repo} branch '{branch}'. Check the branch name."
+
+    local_sha = _get_local_sha(local_dir)
+
+    if local_sha == remote_sha:
+        return (
+            f"Already up to date.\n"
+            f"Repo: {repo} ({branch})\n"
+            f"SHA: {remote_sha[:8]}\n"
+            f"Local: {local_dir}"
+        )
+
+    # Clone or re-clone
+    try:
+        if os.path.exists(local_dir):
+            # Remove stale copy and re-clone (shallow repos can't pull cleanly)
+            subprocess.run(["rm", "-rf", local_dir], check=True, timeout=30)
+
+        os.makedirs(os.path.dirname(local_dir), exist_ok=True)
+
+        result = subprocess.run(
+            [
+                "git", "clone",
+                "--depth", "1",
+                "--branch", branch,
+                "--single-branch",
+                clone_url,
+                local_dir,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            err = result.stderr[:200]
+            return f"Error cloning {repo} ({branch}): {err}"
+
+        logger.info("Synced %s/%s to %s (SHA: %s)", repo, branch, local_dir, remote_sha[:8])
+        return (
+            f"Synced successfully.\n"
+            f"Repo: {repo} ({branch})\n"
+            f"SHA: {remote_sha[:8]}\n"
+            f"Local: {local_dir}"
+        )
+
+    except subprocess.TimeoutExpired:
+        return f"Error: Clone timed out for {repo} ({branch}). The repo may be too large."
+    except Exception as e:
+        return f"Error syncing {repo} ({branch}): {e}"
+
+
+@tool
+def read_repo_file(
+    file_path: str,
+    repo: str = "Quote-ly/quotely-data-service",
+    branch: str = "main",
+) -> str:
+    """Read a file from a locally synced repo.
+
+    Call sync_repo first if you haven't already synced this repo+branch.
+
+    Args:
+        file_path: Path relative to repo root (e.g. 'main.py', 'app/config.py').
+        repo: Repository in 'owner/repo' format.
+        branch: Branch name.
+    """
+    if repo not in ALLOWED_REPOS:
+        return f"Error: '{repo}' is not a whitelisted repo."
+
+    local_dir = _repo_dir(repo, branch)
+    full_path = os.path.join(local_dir, file_path)
+
+    if not os.path.exists(local_dir):
+        return (
+            f"Repo not synced yet. Call sync_repo(repo='{repo}', branch='{branch}') first."
+        )
+
+    if not os.path.exists(full_path):
+        return f"File not found: {file_path} in {repo} ({branch})"
+
+    if not os.path.isfile(full_path):
+        return f"'{file_path}' is a directory, not a file. Use list_repo_files to browse."
+
+    try:
+        with open(full_path, "r", errors="replace") as f:
+            content = f.read()
+
+        if len(content) > 50000:
+            content = content[:50000] + f"\n\n... [truncated at 50,000 chars, full file is {len(content)} chars]"
+
+        return content
+    except Exception as e:
+        return f"Error reading {file_path}: {e}"
+
+
+@tool
+def search_repo_code(
+    query: str,
+    repo: str = "Quote-ly/quotely-data-service",
+    branch: str = "main",
+    file_pattern: str = "",
+) -> str:
+    """Search for a pattern in a locally synced repo using grep.
+
+    Call sync_repo first if you haven't already synced this repo+branch.
+
+    Args:
+        query: Search pattern (regex supported).
+        repo: Repository in 'owner/repo' format.
+        branch: Branch name.
+        file_pattern: Optional glob to filter files (e.g. '*.py', '*.vue').
+    """
+    if repo not in ALLOWED_REPOS:
+        return f"Error: '{repo}' is not a whitelisted repo."
+
+    local_dir = _repo_dir(repo, branch)
+
+    if not os.path.exists(local_dir):
+        return (
+            f"Repo not synced yet. Call sync_repo(repo='{repo}', branch='{branch}') first."
+        )
+
+    cmd = ["grep", "-rn", "--include", file_pattern or "*", query, local_dir]
+    if not file_pattern:
+        cmd = ["grep", "-rn", query, local_dir]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode == 1:
+            return f"No matches found for '{query}' in {repo} ({branch})."
+
+        if result.returncode != 0:
+            return f"Search error: {result.stderr[:200]}"
+
+        # Format results: strip the local dir prefix for readability
+        lines = result.stdout.strip().split("\n")
+        formatted = []
+        for line in lines[:50]:
+            cleaned = line.replace(local_dir + "/", "")
+            formatted.append(cleaned)
+
+        output = "\n".join(formatted)
+        if len(lines) > 50:
+            output += f"\n\n... [{len(lines)} total matches, showing first 50]"
+
+        return output
+
+    except subprocess.TimeoutExpired:
+        return f"Search timed out. Try a more specific query or file_pattern."
+    except Exception as e:
+        return f"Error searching: {e}"
+
+
+@tool
+def list_repo_files(
+    path: str = "",
+    repo: str = "Quote-ly/quotely-data-service",
+    branch: str = "main",
+) -> str:
+    """List files and directories in a locally synced repo.
+
+    Call sync_repo first if you haven't already synced this repo+branch.
+
+    Args:
+        path: Directory path relative to repo root. Empty for root.
+        repo: Repository in 'owner/repo' format.
+        branch: Branch name.
+    """
+    if repo not in ALLOWED_REPOS:
+        return f"Error: '{repo}' is not a whitelisted repo."
+
+    local_dir = _repo_dir(repo, branch)
+    target = os.path.join(local_dir, path) if path else local_dir
+
+    if not os.path.exists(local_dir):
+        return (
+            f"Repo not synced yet. Call sync_repo(repo='{repo}', branch='{branch}') first."
+        )
+
+    if not os.path.exists(target):
+        return f"Path not found: {path} in {repo} ({branch})"
+
+    if not os.path.isdir(target):
+        return f"'{path}' is a file, not a directory. Use read_repo_file to read it."
+
+    try:
+        entries = sorted(os.listdir(target))
+        lines = []
+        for entry in entries:
+            if entry.startswith("."):
+                continue
+            full = os.path.join(target, entry)
+            if os.path.isdir(full):
+                lines.append(f"  {entry}/")
+            else:
+                size = os.path.getsize(full)
+                if size > 1024 * 1024:
+                    size_str = f"{size / (1024*1024):.1f} MB"
+                elif size > 1024:
+                    size_str = f"{size / 1024:.1f} KB"
+                else:
+                    size_str = f"{size} B"
+                lines.append(f"  {entry} ({size_str})")
+
+        if not lines:
+            return f"Empty directory: {path or '/'}"
+
+        header = f"{repo} ({branch}) — {path or '/'}\n"
+        return header + "\n".join(lines)
+
+    except Exception as e:
+        return f"Error listing {path}: {e}"
+
+
+REPO_SYNC_TOOLS = [
+    sync_repo,
+    read_repo_file,
+    search_repo_code,
+    list_repo_files,
+]
