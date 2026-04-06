@@ -57,6 +57,14 @@ class TaskStore:
                 "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
             )
 
+            # Migration: add locked_until column to existing tables
+            try:
+                await db.execute(
+                    "ALTER TABLE tasks ADD COLUMN locked_until REAL NOT NULL DEFAULT 0"
+                )
+            except Exception:
+                pass  # Column already exists
+
             await db.execute(
                 """CREATE TABLE IF NOT EXISTS conversation_refs (
                     conversation_id TEXT PRIMARY KEY,
