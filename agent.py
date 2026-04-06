@@ -264,7 +264,7 @@ SYSTEM_PROMPT = (
 async def _build_graph(user_id: str = "default"):
     """Build a LangGraph agent with user-specific CRM and memory tools."""
     llm = ChatGoogleGenerativeAI(
-        model="gemini-3-flash-preview",
+        model="gemini-3.1-pro-preview",
         project=os.environ.get("GCP_PROJECT_ID"),
         location="global",
         vertexai=True,
