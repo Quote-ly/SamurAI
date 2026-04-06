@@ -146,12 +146,8 @@ async def _send_task_result(task: dict, response: str) -> None:
 
     conv_ref = ConversationReference().deserialize(json.loads(ref_json))
 
-    schedule = task.get("cron_expression") or task.get("run_at") or "one-time"
-    header = (
-        f"**Background Task** `{task['id']}` -- _{task['prompt'][:60]}_\n"
-        f"Schedule: `{schedule}` | Run #{task['run_count'] + 1}\n\n"
-    )
-    message_text = header + response
+    # Keep the message clean — just deliver the content
+    message_text = response
 
     async def _notify(turn_context: TurnContext):
         await turn_context.send_activity(
