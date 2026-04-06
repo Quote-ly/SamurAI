@@ -99,6 +99,11 @@ async def _execute_task(task_id: str) -> None:
     if not task or task["status"] != "active":
         return
 
+    # Acquire execution lock — prevents duplicate runs across instances
+    if not await store.try_lock(task_id):
+        logger.info("Task %s already locked by another instance, skipping", task_id)
+        return
+
     logger.info("Executing task %s: %s", task_id, task["prompt"][:80])
 
     try:
@@ -128,6 +133,8 @@ async def _execute_task(task_id: str) -> None:
             await _send_failure_notification(task, str(e))
             # Remove from scheduler since it's auto-paused
             await pause_task(task_id)
+    finally:
+        await store.unlock(task_id)
 
 
 async def _send_task_result(task: dict, response: str) -> None:

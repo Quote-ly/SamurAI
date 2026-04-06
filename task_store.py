@@ -46,7 +46,8 @@ class TaskStore:
                     run_count INTEGER NOT NULL DEFAULT 0,
                     error_count INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT,
-                    max_failures INTEGER NOT NULL DEFAULT 3
+                    max_failures INTEGER NOT NULL DEFAULT 3,
+                    locked_until REAL NOT NULL DEFAULT 0
                 )"""
             )
             await db.execute(
@@ -197,6 +198,29 @@ class TaskStore:
             cursor = await db.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
             await db.commit()
             return cursor.rowcount > 0
+
+    async def try_lock(self, task_id: str, lock_duration: float = 300) -> bool:
+        """Atomically try to lock a task for execution.
+
+        Returns True if lock acquired, False if another instance already holds it.
+        Uses an atomic UPDATE ... WHERE to prevent race conditions.
+        """
+        now = time.time()
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                "UPDATE tasks SET locked_until = ? WHERE id = ? AND locked_until < ?",
+                (now + lock_duration, task_id, now),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    async def unlock(self, task_id: str) -> None:
+        """Release the execution lock on a task."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE tasks SET locked_until = 0 WHERE id = ?", (task_id,)
+            )
+            await db.commit()
 
     async def record_run(
         self,
