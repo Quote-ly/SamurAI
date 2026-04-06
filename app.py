@@ -17,6 +17,7 @@ from agent import run_agent, inject_auth_message
 from tools.virtualdojo_mcp import exchange_code, start_oauth_flow
 from tools.social_media import _pending_cards
 from tools.background_tasks import _pending_task_context
+from tools.fedramp_docs import _pending_fedramp_cards, _pending_file_uploads, _uploaded_files
 from cards.social import (
     build_social_preview_card,
     build_scheduled_posts_cards,
@@ -64,6 +65,11 @@ async def _keep_typing(turn_context: TurnContext, stop_event: asyncio.Event):
 
 
 async def on_message(turn_context: TurnContext):
+    # Handle FileConsentCard invoke (user accepted/declined file upload)
+    if turn_context.activity.name == "fileConsent/invoke":
+        await _handle_file_consent(turn_context)
+        return
+
     # Handle Adaptive Card Action.Submit callbacks (buttons clicked)
     if turn_context.activity.value and isinstance(turn_context.activity.value, dict):
         await handle_card_action(turn_context, turn_context.activity.value)
@@ -239,11 +245,16 @@ async def on_message(turn_context: TurnContext):
 
     # Check if any tool stored card data for this conversation
     card_data = _pending_cards.pop(conversation_id, None)
+    fedramp_card = _pending_fedramp_cards.pop(conversation_id, None)
 
     if card_data:
         card_type = card_data.get("card_type")
         await _send_card_response(
             turn_context, card_type, card_data, response, conversation_id
+        )
+    elif fedramp_card:
+        await _send_card_response(
+            turn_context, "fedramp_file_upload", fedramp_card, response, conversation_id
         )
     else:
         await turn_context.send_activity(Activity(type="message", text=response))
@@ -289,9 +300,102 @@ async def _send_card_response(
                 Activity(type="message", text=text_fallback)
             )
 
+    elif card_type == "fedramp_file_upload":
+        # Send FileConsentCard for FedRAMP document editing
+        from botbuilder.schema import Attachment
+
+        file_name = card_data.get("file_name", "document.md")
+        file_size = card_data.get("file_size", 0)
+        file_consent_card = {
+            "description": card_data.get("summary", "FedRAMP document for review"),
+            "sizeInBytes": file_size,
+            "acceptContext": {"conversation_id": conversation_id, "file_path": card_data.get("file_path", "")},
+            "declineContext": {"conversation_id": conversation_id},
+        }
+        await turn_context.send_activity(
+            Activity(
+                type="message",
+                text=f"I'd like to upload **{file_name}** for your review.",
+                attachments=[
+                    Attachment(
+                        content_type="application/vnd.microsoft.teams.card.file.consent",
+                        name=file_name,
+                        content=file_consent_card,
+                    )
+                ],
+            )
+        )
+
     else:
         # Unknown card type — fall back to text
         await turn_context.send_activity(Activity(type="message", text=text_fallback))
+
+
+async def _handle_file_consent(turn_context: TurnContext):
+    """Handle FileConsentCard accept/decline from Teams."""
+    value = turn_context.activity.value or {}
+    action = value.get("action", "")
+    context = value.get("context", {})
+    conversation_id = context.get("conversation_id", "")
+
+    if action == "accept":
+        upload_info = value.get("uploadInfo", {})
+        upload_url = upload_info.get("uploadUrl", "")
+        content_url = upload_info.get("contentUrl", "")
+        file_path = context.get("file_path", "")
+
+        if not upload_url or not conversation_id:
+            await turn_context.send_activity(
+                Activity(type="message", text="File upload failed: missing upload info.")
+            )
+            return
+
+        # Get the pending file content
+        pending = _pending_file_uploads.get(conversation_id)
+        if not pending:
+            await turn_context.send_activity(
+                Activity(type="message", text="No pending file found for this conversation.")
+            )
+            return
+
+        # Upload file to OneDrive via the provided URL
+        try:
+            import httpx
+
+            content = pending.get("content", "")
+            file_bytes = content.encode("utf-8") if isinstance(content, str) else content
+            async with httpx.AsyncClient() as client:
+                resp = await client.put(
+                    upload_url,
+                    content=file_bytes,
+                    headers={"Content-Type": "application/octet-stream"},
+                )
+                resp.raise_for_status()
+
+            # Store the content URL for later retrieval when committing
+            _uploaded_files[conversation_id] = {
+                "file_path": file_path,
+                "content_url": content_url,
+            }
+
+            await turn_context.send_activity(
+                Activity(
+                    type="message",
+                    text=f"File uploaded. Click it above to open and edit in Word.\n\n"
+                    f"When you're done editing, say **commit it** to save to GitHub.",
+                )
+            )
+        except Exception as e:
+            print(f"[file_consent] Upload failed: {e}", flush=True)
+            await turn_context.send_activity(
+                Activity(type="message", text=f"File upload failed: {e}")
+            )
+
+    elif action == "decline":
+        _pending_file_uploads.pop(conversation_id, None)
+        await turn_context.send_activity(
+            Activity(type="message", text="File upload declined. The draft has been discarded.")
+        )
 
 
 async def messages(req: web.Request) -> web.Response:

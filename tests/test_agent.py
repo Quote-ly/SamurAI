@@ -39,7 +39,7 @@ def mock_llm():
 
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
-    assert len(agent.STATIC_TOOLS) == 33
+    assert len(agent.STATIC_TOOLS) == 60
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -73,6 +73,20 @@ def test_static_tools_list(mock_llm):
     assert "send_teams_message" in tool_names
     assert "lookup_team_member" in tool_names
     assert "list_team_members" in tool_names
+    # FedRAMP compliance tools
+    assert "fedramp_collect_evidence" in tool_names
+    assert "fedramp_evidence_summary" in tool_names
+    assert "fedramp_daily_log_review" in tool_names
+    assert "fedramp_check_scc_findings" in tool_names
+    # FedRAMP doc tools
+    assert "fedramp_read_document" in tool_names
+    assert "fedramp_propose_edit" in tool_names
+    assert "fedramp_review_code" in tool_names
+    # OSCAL tools
+    assert "oscal_generate_ssp" in tool_names
+    assert "oscal_validate_package" in tool_names
+    assert "oscal_catalog_lookup" in tool_names
+    assert "oscal_render_pdf" in tool_names
 
 
 def test_system_prompt_defined(mock_llm):
@@ -87,6 +101,12 @@ def test_system_prompt_defined(mock_llm):
     assert "Background Tasks" in agent.SYSTEM_PROMPT or "background_task" in agent.SYSTEM_PROMPT
     assert "AUTONOMY RULES" in agent.SYSTEM_PROMPT
     assert "send_teams_message" in agent.SYSTEM_PROMPT
+    # FedRAMP system prompt
+    assert "FedRAMP" in agent.SYSTEM_PROMPT
+    assert "OSCAL" in agent.SYSTEM_PROMPT
+    assert "FR2615441197" in agent.SYSTEM_PROMPT
+    assert "Quote-ly/Fedramp" in agent.SYSTEM_PROMPT
+    assert "fedramp_collect_evidence" in agent.SYSTEM_PROMPT or "fedramp_evidence_summary" in agent.SYSTEM_PROMPT
 
 
 @pytest.mark.asyncio

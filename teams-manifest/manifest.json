@@ -26,7 +26,7 @@
     {
       "botId": "35e1851a-0377-47f3-8b47-09110fec743c",
       "scopes": ["personal", "team", "groupChat"],
-      "supportsFiles": false,
+      "supportsFiles": true,
       "isNotificationOnly": false,
       "commandLists": [
         {
@@ -67,6 +67,22 @@
             {
               "title": "send a message to",
               "description": "Send a Teams message to a team member"
+            },
+            {
+              "title": "fedramp status",
+              "description": "FedRAMP compliance dashboard across all control families"
+            },
+            {
+              "title": "collect fedramp evidence",
+              "description": "Run evidence collection for a NIST control family"
+            },
+            {
+              "title": "review fedramp document",
+              "description": "Read and review a FedRAMP policy or procedure"
+            },
+            {
+              "title": "generate OSCAL package",
+              "description": "Generate or update OSCAL SSP, POA&M, or assessment results"
             }
           ]
         }
