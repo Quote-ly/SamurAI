@@ -261,14 +261,37 @@ SYSTEM_PROMPT = (
 )
 
 
+# Keywords that trigger the Pro model for complex reasoning
+PRO_MODEL_KEYWORDS = [
+    "oscal", "generate ssp", "generate poam", "assessment results",
+    "migrate", "update control", "link evidence", "validate package",
+    "render pdf", "review code", "fedramp_review_code",
+    "propose edit", "commit document", "fedramp document",
+    "update ssp", "update the ssp", "control implementation",
+    "catalog lookup", "look up control",
+]
+
+
+def _needs_pro_model(messages) -> bool:
+    """Check if the conversation needs the Pro model for complex reasoning."""
+    last_human = next(
+        (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
+    )
+    if not last_human:
+        return False
+    content = last_human.content.lower()
+    return any(kw in content for kw in PRO_MODEL_KEYWORDS)
+
+
 async def _build_graph(user_id: str = "default"):
     """Build a LangGraph agent with user-specific CRM and memory tools."""
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-3.1-pro-preview",
+    _gcp_kwargs = dict(
         project=os.environ.get("GCP_PROJECT_ID"),
         location="global",
         vertexai=True,
     )
+    llm_flash = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", **_gcp_kwargs)
+    llm_pro = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", **_gcp_kwargs)
 
     # Combine static tools with user-specific VirtualDojo + memory tools
     user_tools = (
@@ -280,11 +303,18 @@ async def _build_graph(user_id: str = "default"):
         + create_memory_tools(user_id)
     )
 
-    llm_with_tools = llm.bind_tools(user_tools)
+    flash_with_tools = llm_flash.bind_tools(user_tools)
+    pro_with_tools = llm_pro.bind_tools(user_tools)
     tool_node = ToolNode(user_tools, handle_tool_errors=True)
 
     async def call_model(state: MessagesState):
         messages = state["messages"]
+
+        # Select model: Pro for OSCAL/FedRAMP doc/code review, Flash for everything else
+        if _needs_pro_model(messages):
+            llm_with_tools = pro_with_tools
+        else:
+            llm_with_tools = flash_with_tools
 
         # Build system prompt, injecting any relevant long-term memories
         system_content = SYSTEM_PROMPT

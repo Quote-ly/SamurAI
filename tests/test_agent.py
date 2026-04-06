@@ -109,6 +109,61 @@ def test_system_prompt_defined(mock_llm):
     assert "fedramp_collect_evidence" in agent.SYSTEM_PROMPT or "fedramp_evidence_summary" in agent.SYSTEM_PROMPT
 
 
+def test_needs_pro_model_for_oscal(mock_llm):
+    _, agent = mock_llm
+    from langchain_core.messages import HumanMessage
+
+    assert agent._needs_pro_model([HumanMessage(content="generate the OSCAL SSP")])
+    assert agent._needs_pro_model([HumanMessage(content="review code in main.py")])
+    assert agent._needs_pro_model([HumanMessage(content="update the SSP control AC-2")])
+    assert agent._needs_pro_model([HumanMessage(content="migrate the ConMon SOP to OSCAL")])
+    assert agent._needs_pro_model([HumanMessage(content="validate package")])
+    assert agent._needs_pro_model([HumanMessage(content="render PDF of the SSP")])
+    assert agent._needs_pro_model([HumanMessage(content="propose edit to the IR plan")])
+    assert agent._needs_pro_model([HumanMessage(content="look up control AC-2")])
+
+
+def test_needs_flash_model_for_simple_queries(mock_llm):
+    _, agent = mock_llm
+    from langchain_core.messages import HumanMessage
+
+    assert not agent._needs_pro_model([HumanMessage(content="check the logs for errors")])
+    assert not agent._needs_pro_model([HumanMessage(content="list cloud run services")])
+    assert not agent._needs_pro_model([HumanMessage(content="show open PRs")])
+    assert not agent._needs_pro_model([HumanMessage(content="send a message to Cyrus")])
+    assert not agent._needs_pro_model([HumanMessage(content="list my background tasks")])
+    assert not agent._needs_pro_model([HumanMessage(content="what's the fedramp status")])
+    assert not agent._needs_pro_model([HumanMessage(content="collect evidence for AC")])
+
+
+def test_needs_pro_model_empty_messages(mock_llm):
+    _, agent = mock_llm
+    assert not agent._needs_pro_model([])
+
+
+def test_pro_model_keywords_defined(mock_llm):
+    _, agent = mock_llm
+    assert isinstance(agent.PRO_MODEL_KEYWORDS, list)
+    assert len(agent.PRO_MODEL_KEYWORDS) > 0
+    assert "oscal" in agent.PRO_MODEL_KEYWORDS
+
+
+@pytest.mark.asyncio
+async def test_build_graph_creates_two_llms(mock_llm):
+    mock_cls_instance, agent = mock_llm
+    # ChatGoogleGenerativeAI should be called twice (flash + pro)
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    agent._user_graphs.clear()
+    await agent._build_graph("test-user")
+    # The mock class is called twice — once for flash, once for pro
+    assert ChatGoogleGenerativeAI.call_count >= 2
+    calls = ChatGoogleGenerativeAI.call_args_list
+    models = [c.kwargs.get("model") or c.args[0] if c.args else c.kwargs.get("model") for c in calls[-2:]]
+    assert "gemini-3-flash-preview" in models
+    assert "gemini-3.1-pro-preview" in models
+
+
 @pytest.mark.asyncio
 async def test_run_agent_returns_final_message(mock_llm):
     _, agent = mock_llm
