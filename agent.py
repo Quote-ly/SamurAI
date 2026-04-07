@@ -490,6 +490,7 @@ async def run_agent(
 
     final_messages = []
     _sent_statuses: set[str] = set()  # Track sent labels to avoid duplicates
+    _first_tool_call = True  # Track if this is the first tool call
 
     async for event in graph.astream(
         {"messages": [HumanMessage(content=message)]},
@@ -499,7 +500,7 @@ async def run_agent(
         # event is a dict like {"agent": {"messages": [...]}} or {"tools": {"messages": [...]}}
         if "agent" in event:
             final_messages = event["agent"].get("messages", [])
-            # Check if the agent is about to call tools — send one status update
+            # Check if the agent is about to call tools — send a status update
             if status_callback and final_messages:
                 last_msg = final_messages[-1]
                 if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
@@ -512,7 +513,12 @@ async def run_agent(
                             _sent_statuses.add(label)
                             new_labels.append(label)
                     if new_labels:
-                        status = "_" + ", ".join(new_labels) + "..._"
+                        tool_text = "_" + ", ".join(new_labels) + "..._"
+                        if _first_tool_call:
+                            status = "On it — " + tool_text
+                            _first_tool_call = False
+                        else:
+                            status = tool_text
                         try:
                             await status_callback(status)
                         except Exception:
