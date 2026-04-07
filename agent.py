@@ -214,12 +214,6 @@ SYSTEM_PROMPT = (
     "- Deleting any persistent data\n\n"
     "When in doubt about whether an action is destructive: ASK first.\n"
     "For read-only and communication actions: ACT first, report results.\n\n"
-    "RESPONSE STYLE when using tools:\n"
-    "When you are about to call tools, ALWAYS include a brief natural language acknowledgment "
-    "in the same response. This text will be shown to the user immediately while the tools run.\n"
-    "Examples: 'Let me check the logs for you.', 'I'll clean up those duplicate issues.', "
-    "'Pulling the latest code to take a look.'\n"
-    "Keep it to one short sentence. Do NOT explain what tools you are calling.\n\n"
     "FedRAMP Compliance & OSCAL:\n"
     "VirtualDojo is pursuing FedRAMP Moderate authorization (ID: FR2615441197).\n"
     "FedRAMP 20x replaces document-heavy processes with automated, machine-readable evidence.\n"
@@ -317,15 +311,27 @@ def _needs_pro_model(messages) -> bool:
     return any(kw in content for kw in PRO_MODEL_KEYWORDS)
 
 
+_GCP_KWARGS = dict(
+    project=os.environ.get("GCP_PROJECT_ID"),
+    location="global",
+    vertexai=True,
+)
+
+# Lightweight model for instant acknowledgments — no tools, tiny prompt
+_ack_llm = None
+
+
+def _get_ack_llm():
+    global _ack_llm
+    if _ack_llm is None:
+        _ack_llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", **_GCP_KWARGS)
+    return _ack_llm
+
+
 async def _build_graph(user_id: str = "default"):
     """Build a LangGraph agent with user-specific CRM and memory tools."""
-    _gcp_kwargs = dict(
-        project=os.environ.get("GCP_PROJECT_ID"),
-        location="global",
-        vertexai=True,
-    )
-    llm_flash = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", **_gcp_kwargs)
-    llm_pro = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", **_gcp_kwargs)
+    llm_flash = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", **_GCP_KWARGS)
+    llm_pro = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", **_GCP_KWARGS)
 
     # Combine static tools with user-specific VirtualDojo + memory tools
     user_tools = (
@@ -465,6 +471,27 @@ async def run_agent(
     if context_parts:
         message = f"[{' | '.join(context_parts)}]\n{user_message}"
 
+    # Fast acknowledgment via lightweight model (no tools, ~0.5s)
+    if status_callback:
+        try:
+            ack_llm = _get_ack_llm()
+            ack_response = await ack_llm.ainvoke([
+                SystemMessage(content=(
+                    "You are SamurAI, a DevOps assistant. The user just sent a message. "
+                    "Write a single brief sentence acknowledging what they asked and that you're working on it. "
+                    "Be natural and specific to their request. No emojis. No tool names. Examples: "
+                    "'Let me check the production logs for you.' "
+                    "'I\\'ll look into those GitHub issues.' "
+                    "'Pulling up the service status now.'"
+                )),
+                HumanMessage(content=user_message),
+            ])
+            ack_text = _extract_text(ack_response.content).strip()
+            if ack_text:
+                await status_callback(ack_text)
+        except Exception:
+            pass  # Don't block the main agent if ack fails
+
     graph = await _get_graph(user_id)
     config = {"configurable": {"thread_id": conversation_id}}
 
@@ -496,7 +523,6 @@ async def run_agent(
 
     final_messages = []
     _sent_statuses: set[str] = set()  # Track sent labels to avoid duplicates
-    _first_tool_call = True  # Track if this is the first tool call
 
     async for event in graph.astream(
         {"messages": [HumanMessage(content=message)]},
@@ -506,29 +532,18 @@ async def run_agent(
         # event is a dict like {"agent": {"messages": [...]}} or {"tools": {"messages": [...]}}
         if "agent" in event:
             final_messages = event["agent"].get("messages", [])
-            # Check if the agent is about to call tools — send a status update
+            # Send status updates for tool calls (ack already sent above)
             if status_callback and final_messages:
                 last_msg = final_messages[-1]
                 if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                     tool_names = [tc.get("name", "") for tc in last_msg.tool_calls]
-                    # Deduplicate — only send labels we haven't sent before
                     new_labels = []
                     for n in tool_names:
                         label = _tool_labels.get(n, n)
                         if label not in _sent_statuses:
                             _sent_statuses.add(label)
                             new_labels.append(label)
-                    if _first_tool_call:
-                        # Send the LLM's natural language acknowledgment
-                        ack_text = _extract_text(last_msg.content).strip()
-                        if ack_text:
-                            try:
-                                await status_callback(ack_text)
-                            except Exception:
-                                pass
-                        _first_tool_call = False
-                    elif new_labels:
-                        # Subsequent tool calls — just show tool labels
+                    if new_labels:
                         status = "_" + ", ".join(new_labels) + "..._"
                         try:
                             await status_callback(status)
