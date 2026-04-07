@@ -69,15 +69,24 @@ async def _keep_typing(turn_context: TurnContext, stop_event: asyncio.Event):
 
 
 async def on_message(turn_context: TurnContext):
+    activity_type = turn_context.activity.type
+    activity_name = getattr(turn_context.activity, "name", None)
+    print(f"[on_message] type={activity_type} name={activity_name}", flush=True)
+
     # Handle FileConsentCard invoke (user accepted/declined file upload)
-    if turn_context.activity.name == "fileConsent/invoke":
+    if activity_name == "fileConsent/invoke":
+        print("[on_message] Routing to file consent handler", flush=True)
         await _handle_file_consent(turn_context)
         return
 
     # Handle Adaptive Card Action.Submit callbacks (buttons clicked)
     if turn_context.activity.value and isinstance(turn_context.activity.value, dict):
-        await handle_card_action(turn_context, turn_context.activity.value)
-        return
+        # Don't catch file consent invokes here
+        if activity_name:
+            pass  # Let it fall through to normal message handling
+        else:
+            await handle_card_action(turn_context, turn_context.activity.value)
+            return
 
     user_message = turn_context.activity.text or ""
     conversation_id = turn_context.activity.conversation.id
