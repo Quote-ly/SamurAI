@@ -657,6 +657,32 @@ async def run_agent(
         "oscal_migrate_from_markdown": "Migrating to OSCAL",
         "oscal_link_evidence": "Linking evidence",
         "oscal_generate_assessment_results": "Generating assessment results",
+        # Background tasks
+        "list_background_tasks": "Checking background tasks",
+        "pause_background_task": "Pausing task",
+        "resume_background_task": "Resuming task",
+        "cancel_background_task": "Cancelling task",
+        # Teams
+        "lookup_team_member": "Looking up team member",
+        "list_team_members": "Listing team members",
+        # GitHub Projects
+        "github_list_projects": "Listing GitHub projects",
+        "github_get_project_items": "Reading project items",
+        "github_create_draft_issue": "Creating draft issue",
+        "github_add_item_to_project": "Adding to project",
+        "github_update_item_field": "Updating project field",
+        # Social media
+        "social_preview_post": "Drafting social post",
+        "social_publish_post": "Publishing post",
+        "social_schedule_post": "Scheduling post",
+        "social_list_scheduled": "Checking scheduled posts",
+        "social_get_post": "Reading post details",
+        "social_update_post": "Updating post",
+        "social_delete_post": "Deleting post",
+        "social_generate_image": "Generating image",
+        # FedRAMP docs
+        "fedramp_discard_draft": "Discarding draft",
+        "fedramp_scan_container_vulnerabilities": "Scanning container vulnerabilities",
     }
 
     final_messages = []
