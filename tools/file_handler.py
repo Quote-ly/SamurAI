@@ -261,8 +261,188 @@ def edit_spreadsheet(
         return f"Error editing spreadsheet: {e}"
 
 
+@tool
+def get_spreadsheet_info(conversation_id: str) -> str:
+    """Get the structure of an uploaded spreadsheet — sheets, columns, row count, and sample data.
+
+    Use this before fill_spreadsheet_column to understand the sheet layout.
+
+    Args:
+        conversation_id: The current conversation ID (from context brackets).
+    """
+    file_info = _uploaded_files.get(conversation_id)
+    if not file_info:
+        return "No file has been uploaded in this conversation."
+    if file_info["file_type"] != "xlsx":
+        return "This tool only works with .xlsx files."
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(io.BytesIO(file_info["content_bytes"]), read_only=True, data_only=True)
+    lines = []
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            lines.append(f"**Sheet: {sheet_name}** — empty")
+            continue
+
+        headers = [str(c) if c is not None else "" for c in rows[0]]
+        row_count = len(rows) - 1  # Exclude header
+
+        lines.append(f"**Sheet: {sheet_name}** — {row_count} data rows, {len(headers)} columns")
+        lines.append(f"Columns: {' | '.join(headers)}")
+
+        # Show first 3 data rows as sample
+        sample_rows = rows[1:4]
+        if sample_rows:
+            lines.append("Sample data:")
+            for r in sample_rows:
+                cells = [str(c) if c is not None else "" for c in r]
+                lines.append(f"  {' | '.join(cells)}")
+
+        # Show which columns have empty cells
+        empty_cols = []
+        for col_idx, header in enumerate(headers):
+            empty_count = sum(1 for r in rows[1:] if r[col_idx] is None or str(r[col_idx]).strip() == "")
+            if empty_count > 0:
+                empty_cols.append(f"{header} ({empty_count} empty)")
+        if empty_cols:
+            lines.append(f"Columns with empty cells: {', '.join(empty_cols)}")
+        lines.append("")
+
+    wb.close()
+    return "\n".join(lines)
+
+
+@tool
+def fill_spreadsheet_column(
+    conversation_id: str,
+    user_email: str,
+    sheet_name: str,
+    target_column: str,
+    expression: str,
+    start_row: int = 2,
+    end_row: int = 0,
+    summary: str = "Column filled by SamurAI",
+) -> str:
+    """Fill a column in the uploaded spreadsheet using a Python expression.
+
+    The expression is evaluated for each row with access to all column values.
+    Column values are available by their header name (spaces replaced with underscores,
+    lowercased). Example: if headers are "Name", "Score", "Grade", the expression
+    can reference `name`, `score`, `grade`.
+
+    Built-in helpers available in the expression:
+    - row_num: the current row number (1-indexed)
+    - All standard Python: str(), int(), float(), len(), round(), etc.
+
+    Examples:
+        target_column="Grade", expression="'A' if score >= 90 else 'B' if score >= 80 else 'C'"
+        target_column="Full Name", expression="f'{first_name} {last_name}'"
+        target_column="Risk", expression="'High' if severity > 7 else 'Medium' if severity > 4 else 'Low'"
+        target_column="Status", expression="'Overdue' if days_open > 30 else 'On Track'"
+
+    Args:
+        conversation_id: The current conversation ID (from context brackets).
+        user_email: The user's email (from context brackets).
+        sheet_name: The sheet to edit.
+        target_column: The header name of the column to fill.
+        expression: A Python expression evaluated per row. Column values available as variables.
+        start_row: First data row to fill (default 2, since row 1 is headers).
+        end_row: Last row to fill (default 0 = all rows).
+        summary: Brief description of the changes.
+    """
+    from openpyxl import load_workbook
+
+    file_info = _uploaded_files.get(conversation_id)
+    if not file_info:
+        return "No file has been uploaded in this conversation."
+    if file_info["file_type"] != "xlsx":
+        return "This tool only works with .xlsx files."
+
+    try:
+        wb = load_workbook(io.BytesIO(file_info["content_bytes"]), data_only=True)
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+
+        # Get headers from row 1
+        headers = []
+        for cell in ws[1]:
+            val = str(cell.value) if cell.value is not None else ""
+            headers.append(val)
+
+        # Map header names to column indices
+        header_map = {}
+        target_col_idx = None
+        for idx, h in enumerate(headers):
+            safe_name = h.strip().lower().replace(" ", "_").replace("-", "_")
+            safe_name = "".join(c for c in safe_name if c.isalnum() or c == "_")
+            header_map[safe_name] = idx
+            if h.strip().lower() == target_column.strip().lower():
+                target_col_idx = idx
+
+        if target_col_idx is None:
+            return f"Column '{target_column}' not found. Available columns: {', '.join(headers)}"
+
+        # Determine row range
+        max_row = ws.max_row
+        actual_end = end_row if end_row > 0 else max_row
+
+        filled = 0
+        errors = []
+
+        for row_num in range(start_row, actual_end + 1):
+            # Build context variables from this row's cells
+            row_vars = {"row_num": row_num}
+            for safe_name, col_idx in header_map.items():
+                cell_val = ws.cell(row=row_num, column=col_idx + 1).value
+                row_vars[safe_name] = cell_val if cell_val is not None else ""
+
+            try:
+                # Evaluate the expression safely
+                result = eval(expression, {"__builtins__": {
+                    "str": str, "int": int, "float": float, "bool": bool,
+                    "len": len, "round": round, "abs": abs, "min": min, "max": max,
+                    "sum": sum, "sorted": sorted, "enumerate": enumerate,
+                    "True": True, "False": False, "None": None,
+                }}, row_vars)
+
+                ws.cell(row=row_num, column=target_col_idx + 1, value=result)
+                filled += 1
+            except Exception as e:
+                if len(errors) < 3:
+                    errors.append(f"Row {row_num}: {e}")
+
+        # Save
+        output = io.BytesIO()
+        wb.save(output)
+        edited_bytes = output.getvalue()
+        wb.close()
+
+        filename = file_info["filename"]
+        edited_name = f"edited_{filename}"
+
+        _pending_edited_files[conversation_id] = {
+            "filename": edited_name,
+            "content_bytes": edited_bytes,
+            "summary": summary,
+        }
+
+        result_msg = f"Filled {filled} cells in column '{target_column}'."
+        if errors:
+            result_msg += f"\n{len(errors)} errors: " + "; ".join(errors)
+        result_msg += f"\nThe modified file '{edited_name}' will be sent to you."
+        return result_msg
+
+    except Exception as e:
+        return f"Error: {e}"
+
+
 FILE_HANDLER_TOOLS = [
     get_uploaded_file_content,
+    get_spreadsheet_info,
     edit_document,
     edit_spreadsheet,
+    fill_spreadsheet_column,
 ]
