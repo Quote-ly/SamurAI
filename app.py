@@ -213,6 +213,12 @@ async def on_message(turn_context: TurnContext):
             "user_name": user_name,
             "user_timezone": local_tz,
         }
+        async def _send_status(status_text: str):
+            """Send an intermediate status message to Teams."""
+            await turn_context.send_activity(
+                Activity(type="message", text=status_text)
+            )
+
         response = await run_agent(
             user_message,
             conversation_id=conversation_id,
@@ -220,6 +226,7 @@ async def on_message(turn_context: TurnContext):
             user_name=user_name,
             user_timezone=local_tz,
             user_email=user_email,
+            status_callback=_send_status,
         )
         _pending_task_context.pop(conversation_id, None)
     finally:

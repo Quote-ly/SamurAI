@@ -189,13 +189,26 @@ async def test_build_graph_creates_two_llms(mock_llm):
     assert "gemini-3.1-pro-preview" in models
 
 
+def _mock_astream(final_content="ok"):
+    """Create a mock astream that yields agent events."""
+
+    async def astream(*args, **kwargs):
+        # Store call args for assertions
+        astream.last_call_args = args
+        astream.last_call_kwargs = kwargs
+        # Yield a final agent response
+        yield {"agent": {"messages": [MagicMock(content=final_content, tool_calls=[])]}}
+
+    astream.last_call_args = None
+    astream.last_call_kwargs = None
+    return astream
+
+
 @pytest.mark.asyncio
 async def test_run_agent_returns_final_message(mock_llm):
     _, agent = mock_llm
     mock_graph = MagicMock()
-    mock_graph.ainvoke = AsyncMock(
-        return_value={"messages": [MagicMock(content="Here are your logs.")]}
-    )
+    mock_graph.astream = _mock_astream("Here are your logs.")
     agent._get_graph = AsyncMock(return_value=mock_graph)
 
     result = await agent.run_agent("show me recent errors")
@@ -205,15 +218,14 @@ async def test_run_agent_returns_final_message(mock_llm):
 @pytest.mark.asyncio
 async def test_run_agent_passes_human_message(mock_llm):
     _, agent = mock_llm
+    stream_fn = _mock_astream("ok")
     mock_graph = MagicMock()
-    mock_graph.ainvoke = AsyncMock(
-        return_value={"messages": [MagicMock(content="ok")]}
-    )
+    mock_graph.astream = stream_fn
     agent._get_graph = AsyncMock(return_value=mock_graph)
 
     await agent.run_agent("check cloud run services")
 
-    call_args = mock_graph.ainvoke.call_args[0][0]
+    call_args = stream_fn.last_call_args[0]
     messages = call_args["messages"]
     assert len(messages) == 1
     assert "check cloud run services" in messages[0].content
@@ -222,10 +234,9 @@ async def test_run_agent_passes_human_message(mock_llm):
 @pytest.mark.asyncio
 async def test_run_agent_includes_user_context(mock_llm):
     _, agent = mock_llm
+    stream_fn = _mock_astream("ok")
     mock_graph = MagicMock()
-    mock_graph.ainvoke = AsyncMock(
-        return_value={"messages": [MagicMock(content="ok")]}
-    )
+    mock_graph.astream = stream_fn
     agent._get_graph = AsyncMock(return_value=mock_graph)
 
     await agent.run_agent(
@@ -236,7 +247,7 @@ async def test_run_agent_includes_user_context(mock_llm):
         user_email="alice@test.com",
     )
 
-    call_args = mock_graph.ainvoke.call_args[0][0]
+    call_args = stream_fn.last_call_args[0]
     message_text = call_args["messages"][0].content
     assert "User: Alice" in message_text
     assert "Email: alice@test.com" in message_text

@@ -434,6 +434,7 @@ async def run_agent(
     user_name: str = "",
     user_timezone: str = "",
     user_email: str = "",
+    status_callback=None,
 ) -> str:
     start = time.time()
 
@@ -463,16 +464,61 @@ async def run_agent(
 
     graph = await _get_graph(user_id)
     config = {"configurable": {"thread_id": conversation_id}}
-    result = await graph.ainvoke(
+
+    # Friendly tool names for status updates
+    _tool_labels = {
+        "sync_repo": "Syncing repository",
+        "read_repo_file": "Reading source code",
+        "search_repo_code": "Searching codebase",
+        "list_repo_files": "Browsing files",
+        "db_query": "Querying database",
+        "db_list_tables": "Listing tables",
+        "db_describe_table": "Inspecting table schema",
+        "db_check_user": "Looking up user",
+        "db_recent_audit_logs": "Checking audit logs",
+        "query_cloud_logs": "Querying Cloud Logging",
+        "list_cloud_run_services": "Checking Cloud Run services",
+        "check_gcp_metrics": "Checking metrics",
+        "fedramp_collect_evidence": "Collecting FedRAMP evidence",
+        "fedramp_daily_log_review": "Running audit log review",
+        "fedramp_check_scc_findings": "Checking Security Command Center",
+        "fedramp_evidence_summary": "Building compliance dashboard",
+        "oscal_generate_ssp": "Generating OSCAL SSP",
+        "oscal_validate_package": "Validating OSCAL package",
+        "oscal_render_pdf": "Rendering PDF",
+        "google_search": "Searching the web",
+        "send_teams_message": "Sending Teams message",
+        "create_background_task": "Creating background task",
+    }
+
+    final_messages = []
+    async for event in graph.astream(
         {"messages": [HumanMessage(content=message)]},
         config=config,
-    )
+        stream_mode="updates",
+    ):
+        # event is a dict like {"agent": {"messages": [...]}} or {"tools": {"messages": [...]}}
+        if "agent" in event:
+            final_messages = event["agent"].get("messages", [])
+            # Check if the agent is about to call tools — send a status update
+            if status_callback and final_messages:
+                last_msg = final_messages[-1]
+                if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+                    tool_names = [tc.get("name", "") for tc in last_msg.tool_calls]
+                    labels = [_tool_labels.get(n, n) for n in tool_names]
+                    status = "..." + ", ".join(labels) + "..."
+                    try:
+                        await status_callback(status)
+                    except Exception:
+                        pass  # Don't break the agent loop for status failures
+
+        elif "tools" in event:
+            final_messages = event["tools"].get("messages", [])
 
     elapsed = time.time() - start
     logger.info("[run_agent] user=%s elapsed=%.2fs", user_name or user_id, elapsed)
 
-    messages = result.get("messages", [])
-    if not messages:
+    if not final_messages:
         logger.error("[run_agent] empty messages in result for thread=%s", conversation_id)
         return "I wasn't able to generate a response. Please try again."
-    return _extract_text(messages[-1].content)
+    return _extract_text(final_messages[-1].content)
