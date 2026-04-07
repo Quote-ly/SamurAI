@@ -497,12 +497,14 @@ async def _handle_file_consent(turn_context: TurnContext):
                 "content_url": content_url,
             }
 
+            file_name = upload_info.get("name", "file")
+            if content_url:
+                msg = f"File uploaded: [{file_name}]({content_url})"
+            else:
+                msg = f"File uploaded: **{file_name}** (check your OneDrive)"
+
             await turn_context.send_activity(
-                Activity(
-                    type="message",
-                    text=f"File uploaded. Click it above to open and edit in Word.\n\n"
-                    f"When you're done editing, say **commit it** to save to GitHub.",
-                )
+                Activity(type="message", text=msg)
             )
         except Exception as e:
             print(f"[file_consent] Upload failed: {e}", flush=True)
