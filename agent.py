@@ -741,6 +741,14 @@ async def run_agent(
 
     response_text = _extract_text(final_messages[-1].content)
 
+    # If the agent hit the iteration limit, the last message may have tool calls
+    # but no text. Provide a fallback response.
+    if not response_text or not response_text.strip():
+        response_text = (
+            "I've gathered a lot of information but hit my tool call limit. "
+            "Here's what I have so far — ask me to continue if you need more detail."
+        )
+
     # Background memory extraction — auto-saves facts from conversation
     try:
         executor = get_background_extractor()
