@@ -517,7 +517,7 @@ def reset_user_graph(user_id: str):
 async def inject_auth_message(user_id: str, conversation_id: str):
     """Inject a message into the conversation history confirming CRM auth succeeded."""
     graph = await _get_graph(user_id)
-    config = {"configurable": {"thread_id": conversation_id}}
+    config = {"configurable": {"thread_id": conversation_id, "user_id": user_id}}
     await graph.ainvoke(
         {
             "messages": [
@@ -601,7 +601,7 @@ async def run_agent(
             pass  # Don't block the main agent if ack fails
 
     graph = await _get_graph(user_id)
-    config = {"configurable": {"thread_id": conversation_id}}
+    config = {"configurable": {"thread_id": conversation_id, "user_id": user_id}}
 
     # Friendly tool names for status updates
     _tool_labels = {
