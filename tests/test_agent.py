@@ -39,7 +39,7 @@ def mock_llm():
 
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
-    assert len(agent.STATIC_TOOLS) == 64
+    assert len(agent.STATIC_TOOLS) == 69
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -92,6 +92,12 @@ def test_static_tools_list(mock_llm):
     assert "read_repo_file" in tool_names
     assert "search_repo_code" in tool_names
     assert "list_repo_files" in tool_names
+    # Database tools
+    assert "db_query" in tool_names
+    assert "db_list_tables" in tool_names
+    assert "db_describe_table" in tool_names
+    assert "db_check_user" in tool_names
+    assert "db_recent_audit_logs" in tool_names
 
 
 def test_system_prompt_defined(mock_llm):

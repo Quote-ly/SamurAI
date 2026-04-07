@@ -33,6 +33,7 @@ from tools.fedramp import FEDRAMP_TOOLS
 from tools.fedramp_docs import FEDRAMP_DOC_TOOLS
 from tools.fedramp_oscal import FEDRAMP_OSCAL_TOOLS
 from tools.repo_sync import REPO_SYNC_TOOLS
+from tools.database import DATABASE_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ STATIC_TOOLS = [
     github_create_issue,
     github_list_workflow_runs,
     github_get_workflow_run_details,
-] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search] + BACKGROUND_TASK_TOOLS + TEAMS_MESSAGING_TOOLS + FEDRAMP_TOOLS + FEDRAMP_DOC_TOOLS + FEDRAMP_OSCAL_TOOLS + REPO_SYNC_TOOLS
+] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search] + BACKGROUND_TASK_TOOLS + TEAMS_MESSAGING_TOOLS + FEDRAMP_TOOLS + FEDRAMP_DOC_TOOLS + FEDRAMP_OSCAL_TOOLS + REPO_SYNC_TOOLS + DATABASE_TOOLS
 
 SYSTEM_PROMPT = (
     "You are SamurAI, a DevOps and CRM assistant in Microsoft Teams. "
@@ -273,7 +274,15 @@ SYSTEM_PROMPT = (
     "- Development issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='development')\n"
     "- Bot issues: sync_repo(repo='Quote-ly/SamurAI', branch='main')\n"
     "Always sync before reading code — the local copy may be stale.\n"
-    "When troubleshooting, read the actual code, don't guess at what it does."
+    "When troubleshooting, read the actual code, don't guess at what it does.\n\n"
+    "Database Access (Read-Only):\n"
+    "You have SELECT-only access to the PRODUCTION AlloyDB database (quotely on virtualdojo-fedramp-prod).\n"
+    "Tools: db_query, db_list_tables, db_describe_table, db_check_user, db_recent_audit_logs.\n"
+    "IMPORTANT: Database access is PRODUCTION ONLY. Dev database is NOT accessible due to VPC CIDR overlap.\n"
+    "You CANNOT write to the database — INSERT, UPDATE, DELETE are blocked at both code and DB user level.\n"
+    "Use db_list_tables to discover tables, db_describe_table to see columns, and db_query for custom SELECTs.\n"
+    "For troubleshooting auth issues, use db_recent_audit_logs and db_check_user.\n"
+    "When troubleshooting, combine database queries with logs and code review for a complete picture."
 )
 
 
