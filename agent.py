@@ -214,6 +214,12 @@ SYSTEM_PROMPT = (
     "- Deleting any persistent data\n\n"
     "When in doubt about whether an action is destructive: ASK first.\n"
     "For read-only and communication actions: ACT first, report results.\n\n"
+    "RESPONSE STYLE when using tools:\n"
+    "When you are about to call tools, ALWAYS include a brief natural language acknowledgment "
+    "in the same response. This text will be shown to the user immediately while the tools run.\n"
+    "Examples: 'Let me check the logs for you.', 'I'll clean up those duplicate issues.', "
+    "'Pulling the latest code to take a look.'\n"
+    "Keep it to one short sentence. Do NOT explain what tools you are calling.\n\n"
     "FedRAMP Compliance & OSCAL:\n"
     "VirtualDojo is pursuing FedRAMP Moderate authorization (ID: FR2615441197).\n"
     "FedRAMP 20x replaces document-heavy processes with automated, machine-readable evidence.\n"
@@ -512,13 +518,18 @@ async def run_agent(
                         if label not in _sent_statuses:
                             _sent_statuses.add(label)
                             new_labels.append(label)
-                    if new_labels:
-                        tool_text = "_" + ", ".join(new_labels) + "..._"
-                        if _first_tool_call:
-                            status = "On it — " + tool_text
-                            _first_tool_call = False
-                        else:
-                            status = tool_text
+                    if _first_tool_call:
+                        # Send the LLM's natural language acknowledgment
+                        ack_text = _extract_text(last_msg.content).strip()
+                        if ack_text:
+                            try:
+                                await status_callback(ack_text)
+                            except Exception:
+                                pass
+                        _first_tool_call = False
+                    elif new_labels:
+                        # Subsequent tool calls — just show tool labels
+                        status = "_" + ", ".join(new_labels) + "..._"
                         try:
                             await status_callback(status)
                         except Exception:
