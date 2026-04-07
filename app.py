@@ -79,11 +79,50 @@ async def on_message(turn_context: TurnContext):
         await handle_card_action(turn_context, turn_context.activity.value)
         return
 
-    user_message = turn_context.activity.text
+    user_message = turn_context.activity.text or ""
+    conversation_id = turn_context.activity.conversation.id
+
+    # Handle file attachments — download, parse, and append content to message
+    file_context = ""
+    attachments = turn_context.activity.attachments or []
+    for att in attachments:
+        if att.content_type == "application/vnd.microsoft.teams.file.download.info":
+            try:
+                import httpx
+                from tools.file_handler import parse_file, _uploaded_files
+
+                download_url = att.content.get("downloadUrl", "")
+                filename = att.name or "unknown"
+                print(f"[on_message] File received: {filename}", flush=True)
+
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(download_url)
+                    resp.raise_for_status()
+                    content_bytes = resp.content
+
+                text_content, file_type = parse_file(filename, content_bytes)
+
+                # Store for agent tools (edit_document, get_uploaded_file_content)
+                _uploaded_files[conversation_id] = {
+                    "filename": filename,
+                    "content_bytes": content_bytes,
+                    "file_type": file_type,
+                    "text_content": text_content,
+                }
+
+                preview = text_content[:5000] if len(text_content) > 5000 else text_content
+                file_context += f"\n\n[Attached file: {filename} ({file_type})]\n{preview}"
+                if len(text_content) > 5000:
+                    file_context += f"\n... [truncated — use get_uploaded_file_content for full content]"
+            except Exception as e:
+                print(f"[on_message] File download/parse failed: {e}", flush=True)
+                file_context += f"\n\n[Attached file: {att.name} — failed to process: {e}]"
+
+    if file_context:
+        user_message = (user_message or "The user uploaded a file. Please review it.") + file_context
+
     if not user_message:
         return
-
-    conversation_id = turn_context.activity.conversation.id
 
     # Handle "stop" command — cancel the running agent task
     if user_message.strip().lower() == "stop":
@@ -279,6 +318,10 @@ async def on_message(turn_context: TurnContext):
     card_data = _pending_cards.pop(conversation_id, None)
     fedramp_card = _pending_fedramp_cards.pop(conversation_id, None)
 
+    # Check for edited files to send back
+    from tools.file_handler import _pending_edited_files
+    edited_file = _pending_edited_files.pop(conversation_id, None)
+
     if card_data:
         card_type = card_data.get("card_type")
         await _send_card_response(
@@ -290,6 +333,39 @@ async def on_message(turn_context: TurnContext):
         )
     else:
         await turn_context.send_activity(Activity(type="message", text=response))
+
+    # Send edited file via FileConsentCard if one was created
+    if edited_file:
+        from botbuilder.schema import Attachment
+
+        file_name = edited_file["filename"]
+        file_size = len(edited_file["content_bytes"])
+        file_consent_card = {
+            "description": edited_file.get("summary", "Edited document"),
+            "sizeInBytes": file_size,
+            "acceptContext": {
+                "conversation_id": conversation_id,
+                "file_source": "edited_document",
+            },
+            "declineContext": {"conversation_id": conversation_id},
+        }
+        # Store the bytes for the upload callback
+        from tools.file_handler import _pending_edited_files as _pef_store
+        _pef_store[f"_upload_{conversation_id}"] = edited_file
+
+        await turn_context.send_activity(
+            Activity(
+                type="message",
+                text=f"Here's the edited file: **{file_name}**",
+                attachments=[
+                    Attachment(
+                        content_type="application/vnd.microsoft.teams.card.file.consent",
+                        name=file_name,
+                        content=file_consent_card,
+                    )
+                ],
+            )
+        )
 
 
 async def _send_card_response(
@@ -382,9 +458,12 @@ async def _handle_file_consent(turn_context: TurnContext):
             )
             return
 
-        # Get the pending file content
+        # Get the pending file content — check FedRAMP docs first, then edited files
+        from tools.file_handler import _pending_edited_files as _edit_store
         pending = _pending_file_uploads.get(conversation_id)
-        if not pending:
+        edited = _edit_store.pop(f"_upload_{conversation_id}", None)
+
+        if not pending and not edited:
             await turn_context.send_activity(
                 Activity(type="message", text="No pending file found for this conversation.")
             )
@@ -394,8 +473,11 @@ async def _handle_file_consent(turn_context: TurnContext):
         try:
             import httpx
 
-            content = pending.get("content", "")
-            file_bytes = content.encode("utf-8") if isinstance(content, str) else content
+            if edited:
+                file_bytes = edited["content_bytes"]
+            else:
+                content = pending.get("content", "")
+                file_bytes = content.encode("utf-8") if isinstance(content, str) else content
             async with httpx.AsyncClient() as client:
                 resp = await client.put(
                     upload_url,

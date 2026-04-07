@@ -41,6 +41,7 @@ from tools.fedramp import FEDRAMP_TOOLS
 from tools.fedramp_docs import FEDRAMP_DOC_TOOLS
 from tools.fedramp_oscal import FEDRAMP_OSCAL_TOOLS
 from tools.repo_sync import REPO_SYNC_TOOLS
+from tools.file_handler import FILE_HANDLER_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,7 @@ TOOL_GROUPS = {
             list_cloud_run_services,
             check_gcp_metrics,
             google_search,
-        ] + BACKGROUND_TASK_TOOLS,
+        ] + BACKGROUND_TASK_TOOLS + FILE_HANDLER_TOOLS,
         "keywords": [],  # Always loaded
     },
     "github": {
@@ -633,6 +634,9 @@ async def run_agent(
         "create_background_task": "Creating background task",
         "manage_memory": "Saving to memory",
         "search_memory": "Searching memory",
+        "get_uploaded_file_content": "Reading uploaded file",
+        "edit_document": "Editing document",
+        "edit_spreadsheet": "Editing spreadsheet",
         "fedramp_read_document": "Reading FedRAMP document",
         "fedramp_list_documents": "Browsing FedRAMP docs",
         "fedramp_search_documents": "Searching FedRAMP docs",
