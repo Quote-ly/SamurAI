@@ -33,6 +33,10 @@ from cards.actions import (
 # Key: OAuth state parameter, Value: ConversationReference
 _oauth_conversation_refs: dict[str, object] = {}
 
+# Track running agent tasks so they can be cancelled with "stop"
+# Key: conversation_id, Value: asyncio.Task
+_running_tasks: dict[str, asyncio.Task] = {}
+
 settings = BotFrameworkAdapterSettings(
     app_id=os.environ.get("MICROSOFT_APP_ID", ""),
     app_password=os.environ.get("MICROSOFT_APP_PASSWORD", ""),
@@ -80,6 +84,20 @@ async def on_message(turn_context: TurnContext):
         return
 
     conversation_id = turn_context.activity.conversation.id
+
+    # Handle "stop" command — cancel the running agent task
+    if user_message.strip().lower() == "stop":
+        task = _running_tasks.pop(conversation_id, None)
+        if task and not task.done():
+            task.cancel()
+            await turn_context.send_activity(
+                Activity(type="message", text="Stopped.")
+            )
+        else:
+            await turn_context.send_activity(
+                Activity(type="message", text="Nothing running to stop.")
+            )
+        return
 
     # If we're waiting for a schedule date, intercept the reply
     if is_awaiting_schedule_date(conversation_id):
@@ -219,7 +237,7 @@ async def on_message(turn_context: TurnContext):
                 Activity(type="message", text=status_text)
             )
 
-        response = await run_agent(
+        agent_task = asyncio.create_task(run_agent(
             user_message,
             conversation_id=conversation_id,
             user_id=user_id,
@@ -227,8 +245,15 @@ async def on_message(turn_context: TurnContext):
             user_timezone=local_tz,
             user_email=user_email,
             status_callback=_send_status,
-        )
-        _pending_task_context.pop(conversation_id, None)
+        ))
+        _running_tasks[conversation_id] = agent_task
+        try:
+            response = await agent_task
+        except asyncio.CancelledError:
+            return  # User said "stop" — already handled
+        finally:
+            _running_tasks.pop(conversation_id, None)
+            _pending_task_context.pop(conversation_id, None)
     finally:
         stop_typing.set()
         await typing_task
