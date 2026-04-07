@@ -1,0 +1,114 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: samurai-bot
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/maxScale: '20'
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '20'
+        autoscaling.knative.dev/minScale: '1'
+        run.googleapis.com/cpu-throttling: 'false'
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/startup-cpu-boost: 'true'
+        run.googleapis.com/container-dependencies: '{"samurai-bot":["alloydb-proxy"]}'
+    spec:
+      containerConcurrency: 80
+      serviceAccountName: samurai-bot@virtualdojo-samurai.iam.gserviceaccount.com
+      timeoutSeconds: 300
+      containers:
+      # Main bot container
+      - name: samurai-bot
+        image: us-central1-docker.pkg.dev/virtualdojo-samurai/cloud-run-source-deploy/samurai-bot
+        ports:
+        - containerPort: 8080
+          name: http1
+        env:
+        - name: GITHUB_APP_ID
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: github-app-id
+        - name: GITHUB_APP_PRIVATE_KEY
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: github-app-private-key
+        - name: MICROSOFT_APP_ID
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: ms-app-id
+        - name: MICROSOFT_APP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: ms-app-password
+        - name: AYRSHARE_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: ayrshare-api-key
+        - name: SAMURAI_DATA_DIR
+          value: /data
+        - name: GCP_PROJECT_ID
+          value: virtualdojo-samurai
+        - name: MICROSOFT_APP_TENANT_ID
+          value: a0a6af2b-e398-4029-94c7-5fbae193405f
+        - name: VIRTUALDOJO_MCP_URL
+          value: https://dev.virtualdojo.com/mcp/v1
+        # Database connection via Auth Proxy sidecar
+        - name: DEV_DB_HOST
+          value: 127.0.0.1
+        - name: DEV_DB_PORT
+          value: '5433'
+        - name: DEV_DB_NAME
+          value: quotely
+        - name: DEV_DB_USER
+          value: samurai-bot@virtualdojo-samurai.iam
+        - name: PROD_DB_HOST
+          value: 127.0.0.1
+        - name: PROD_DB_PORT
+          value: '5432'
+        - name: PROD_DB_NAME
+          value: quotely
+        - name: PROD_DB_USER
+          value: samurai-bot@virtualdojo-samurai.iam
+        resources:
+          limits:
+            cpu: '1'
+            memory: 512Mi
+        startupProbe:
+          failureThreshold: 1
+          periodSeconds: 240
+          tcpSocket:
+            port: 8080
+          timeoutSeconds: 240
+        volumeMounts:
+        - mountPath: /data
+          name: samurai-data
+      # AlloyDB Auth Proxy sidecar
+      - name: alloydb-proxy
+        image: gcr.io/alloydb-connectors/alloydb-auth-proxy:latest
+        args:
+        # Dev database on port 5433
+        - "projects/virtualdojo-fedramp-dev/locations/us-central1/clusters/virtualdojo-cluster/instances/virtualdojo-primary"
+        - "--port=5433"
+        - "--auto-iam-authn"
+        - "--address=0.0.0.0"
+        resources:
+          limits:
+            cpu: '0.5'
+            memory: 256Mi
+      volumes:
+      - name: samurai-data
+        csi:
+          driver: gcsfuse.run.googleapis.com
+          volumeAttributes:
+            bucketName: samurai-bot-data
+  traffic:
+  - latestRevision: true
+    percent: 100
