@@ -168,15 +168,17 @@ SYSTEM_PROMPT = (
     "- After gathering enough information, synthesize and respond. Don't keep investigating.\n\n"
     "FILE HANDLING:\n"
     "When a user uploads a file and asks you to fill in, edit, or modify it:\n"
-    "- Use get_spreadsheet_info to understand the structure first.\n"
-    "- Use fill_spreadsheet_column to fill an entire column using a Python expression per row.\n"
-    "  NOTE: fill_spreadsheet_column applies the SAME expression to every row. It cannot make\n"
-    "  different changes to different rows. For row-specific edits, use edit_spreadsheet.\n"
-    "- Use edit_spreadsheet for specific cell updates with [{row, col, value}] JSON.\n"
-    "- Use edit_document for .docx file modifications.\n"
-    "- ALWAYS call the edit/fill tool and return the modified file. Do NOT just describe changes.\n"
-    "- NEVER claim you made specific changes unless the tool confirmed them.\n"
-    "- After editing, tell the user exactly how many cells were changed and which tool was used.\n"
+    "1. Use get_spreadsheet_info to understand the structure.\n"
+    "2. For INITIAL BULK FILL of an empty column: use fill_spreadsheet_column.\n"
+    "   NOTE: This applies the SAME expression to every row.\n"
+    "3. For TARGETED EDITS to specific rows: use edit_spreadsheet with JSON\n"
+    "   [{\"row\": N, \"col\": N, \"value\": \"text\"}] — this is how you update\n"
+    "   individual cells with different content per row.\n"
+    "4. After any edit: use read_spreadsheet_cells to VERIFY the changes actually applied.\n"
+    "5. NEVER claim you made changes without verifying with read_spreadsheet_cells.\n"
+    "6. When the user asks to 'harden' or 'update specific rows', use edit_spreadsheet\n"
+    "   with individual row/col/value updates, NOT fill_spreadsheet_column.\n"
+    "7. Edits are cumulative — each edit builds on the previous version.\n"
     "- The modified file will be sent back to the user via Teams for download.\n\n"
     "IMPORTANT — GCP project IDs you have access to:\n"
     "- virtualdojo-samurai (this bot)\n"
@@ -654,6 +656,7 @@ async def run_agent(
         "search_memory": "Searching memory",
         "get_uploaded_file_content": "Reading uploaded file",
         "get_spreadsheet_info": "Analyzing spreadsheet structure",
+        "read_spreadsheet_cells": "Verifying spreadsheet changes",
         "edit_document": "Editing document",
         "edit_spreadsheet": "Editing spreadsheet",
         "fill_spreadsheet_column": "Filling spreadsheet column",

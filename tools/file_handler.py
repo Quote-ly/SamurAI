@@ -163,6 +163,66 @@ def get_uploaded_file_content(conversation_id: str) -> str:
 
 
 @tool
+def read_spreadsheet_cells(
+    conversation_id: str,
+    sheet_name: str,
+    column: str,
+    start_row: int = 2,
+    end_row: int = 0,
+) -> str:
+    """Read specific cells from the uploaded (or edited) spreadsheet.
+
+    Use this to verify edits were applied or to read specific column values.
+    Reads from the most recent version (edited if available, otherwise original).
+
+    Args:
+        conversation_id: The current conversation ID (from context brackets).
+        sheet_name: The sheet to read from.
+        column: The header name of the column to read.
+        start_row: First data row to read (default 2, headers on row 1).
+        end_row: Last row to read (default 0 = all rows).
+    """
+    from openpyxl import load_workbook
+
+    # Use edited version if available, otherwise original
+    file_info = _uploaded_files.get(conversation_id)
+    if not file_info:
+        return "No file has been uploaded in this conversation."
+    if file_info["file_type"] != "xlsx":
+        return "This tool only works with .xlsx files."
+
+    try:
+        wb = load_workbook(io.BytesIO(file_info["content_bytes"]), read_only=True, data_only=True)
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
+
+        # Find column index
+        headers = [str(c.value) if c.value else "" for c in ws[1]]
+        col_idx = None
+        for idx, h in enumerate(headers):
+            if h.strip().lower() == column.strip().lower():
+                col_idx = idx
+                break
+
+        if col_idx is None:
+            wb.close()
+            return f"Column '{column}' not found. Available: {', '.join(headers)}"
+
+        max_row = ws.max_row
+        actual_end = end_row if end_row > 0 else max_row
+
+        lines = [f"**{column}** (rows {start_row}-{actual_end}):\n"]
+        for row_num in range(start_row, actual_end + 1):
+            val = ws.cell(row=row_num, column=col_idx + 1).value
+            val_str = str(val)[:150] if val is not None else "(empty)"
+            lines.append(f"Row {row_num}: {val_str}")
+
+        wb.close()
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Error reading cells: {e}"
+
+
+@tool
 def edit_document(
     conversation_id: str,
     user_email: str,
@@ -256,7 +316,15 @@ def edit_spreadsheet(
             "summary": summary,
         }
 
-        return f"Spreadsheet edited ({len(update_list)} cells updated). The modified file '{edited_name}' will be sent to you."
+        # Update stored file so subsequent reads/edits see the changes
+        file_info["content_bytes"] = edited_bytes
+        file_info["text_content"] = parse_xlsx(edited_bytes)
+
+        return (
+            f"Spreadsheet edited ({len(update_list)} cells updated). "
+            f"The modified file '{edited_name}' will be sent to you.\n"
+            "Use read_spreadsheet_cells to verify the changes."
+        )
     except Exception as e:
         return f"Error editing spreadsheet: {e}"
 
@@ -431,10 +499,15 @@ def fill_spreadsheet_column(
             "summary": summary,
         }
 
+        # Update the stored file so subsequent reads/edits see the changes
+        file_info["content_bytes"] = edited_bytes
+        file_info["text_content"] = parse_xlsx(edited_bytes)
+
         result_msg = f"Filled {filled} cells in column '{target_column}'."
         if errors:
             result_msg += f"\n{len(errors)} errors: " + "; ".join(errors)
         result_msg += f"\nThe modified file '{edited_name}' will be sent to you."
+        result_msg += "\nUse read_spreadsheet_cells to verify the changes."
         return result_msg
 
     except Exception as e:
@@ -444,6 +517,7 @@ def fill_spreadsheet_column(
 FILE_HANDLER_TOOLS = [
     get_uploaded_file_content,
     get_spreadsheet_info,
+    read_spreadsheet_cells,
     edit_document,
     edit_spreadsheet,
     fill_spreadsheet_column,
