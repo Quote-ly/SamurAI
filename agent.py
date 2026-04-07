@@ -22,6 +22,7 @@ from tools.github import (
     github_create_issue,
     github_list_workflow_runs,
     github_get_workflow_run_details,
+    github_close_issue,
     PROJECT_TOOLS,
 )
 from tools.virtualdojo_mcp import create_virtualdojo_tool, create_virtualdojo_list_tools
@@ -33,7 +34,6 @@ from tools.fedramp import FEDRAMP_TOOLS
 from tools.fedramp_docs import FEDRAMP_DOC_TOOLS
 from tools.fedramp_oscal import FEDRAMP_OSCAL_TOOLS
 from tools.repo_sync import REPO_SYNC_TOOLS
-from tools.database import DATABASE_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,8 @@ STATIC_TOOLS = [
     github_create_issue,
     github_list_workflow_runs,
     github_get_workflow_run_details,
-] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search] + BACKGROUND_TASK_TOOLS + TEAMS_MESSAGING_TOOLS + FEDRAMP_TOOLS + FEDRAMP_DOC_TOOLS + FEDRAMP_OSCAL_TOOLS + REPO_SYNC_TOOLS + DATABASE_TOOLS
+    github_close_issue,
+] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search] + BACKGROUND_TASK_TOOLS + TEAMS_MESSAGING_TOOLS + FEDRAMP_TOOLS + FEDRAMP_DOC_TOOLS + FEDRAMP_OSCAL_TOOLS + REPO_SYNC_TOOLS
 
 SYSTEM_PROMPT = (
     "You are SamurAI, a DevOps and CRM assistant in Microsoft Teams. "
@@ -79,7 +80,9 @@ SYSTEM_PROMPT = (
     "When they say 'CLI' or 'vdojo cli', use Quote-ly/virtualdojo_cli. "
     "When they say just a repo name without 'Quote-ly/', prefix it with 'Quote-ly/'.\n"
     "IMPORTANT: Before creating a GitHub issue, ALWAYS search existing issues first using "
-    "github_list_issues to check for duplicates or similar issues. Do NOT create redundant issues.\n\n"
+    "github_list_issues to check for duplicates or similar issues. Do NOT create redundant issues.\n"
+    "You can close issues with github_close_issue, but ONLY for cleaning up duplicates or "
+    "issues created in error. Always include a reason when closing.\n\n"
     "VirtualDojo CRM:\n"
     "You can query CRM data (contacts, accounts, opportunities, quotes, compliance records) "
     "using the virtualdojo_crm tool. Use virtualdojo_list_tools to discover available operations. "
@@ -276,16 +279,7 @@ SYSTEM_PROMPT = (
     "- Development issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='development')\n"
     "- Bot issues: sync_repo(repo='Quote-ly/SamurAI', branch='main')\n"
     "Always sync before reading code — the local copy may be stale.\n"
-    "When troubleshooting, read the actual code, don't guess at what it does.\n\n"
-    "Database Access (Read-Only):\n"
-    "You have SELECT-only access to the PRODUCTION AlloyDB database (quotely on virtualdojo-fedramp-prod).\n"
-    "Tools: db_query, db_list_tables, db_describe_table, db_check_user, db_recent_audit_logs.\n"
-    "Both production and development databases are accessible via the Auth Proxy sidecar.\n"
-    "Use env='prod' for production, env='dev' for development.\n"
-    "You CANNOT write to the database — INSERT, UPDATE, DELETE are blocked at both code and DB user level.\n"
-    "Use db_list_tables to discover tables, db_describe_table to see columns, and db_query for custom SELECTs.\n"
-    "For troubleshooting auth issues, use db_recent_audit_logs and db_check_user.\n"
-    "When troubleshooting, combine database queries with logs and code review for a complete picture."
+    "When troubleshooting, read the actual code, don't guess at what it does."
 )
 
 

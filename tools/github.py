@@ -598,6 +598,23 @@ def github_update_item_field(
     return f"Updated '{field_name}' to '{value}'"
 
 
+@tool
+def github_close_issue(repo: str, issue_number: int, reason: str = "") -> str:
+    """Close a GitHub issue. Only use this to clean up duplicates or issues created in error.
+
+    Args:
+        repo: Repository in 'owner/repo' format.
+        issue_number: The issue number to close.
+        reason: Brief reason for closing (added as a comment before closing).
+    """
+    repo_obj = _github().get_repo(repo)
+    issue = repo_obj.get_issue(number=issue_number)
+    if reason:
+        issue.create_comment(f"Closing: {reason}")
+    issue.edit(state="closed")
+    return f"Closed issue #{issue_number}: {issue.title}"
+
+
 # All project tools for easy import
 PROJECT_TOOLS = [
     github_list_projects,
