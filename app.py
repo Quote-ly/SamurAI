@@ -478,11 +478,16 @@ async def _handle_file_consent(turn_context: TurnContext):
             else:
                 content = pending.get("content", "")
                 file_bytes = content.encode("utf-8") if isinstance(content, str) else content
+            file_size = len(file_bytes)
             async with httpx.AsyncClient() as client:
                 resp = await client.put(
                     upload_url,
                     content=file_bytes,
-                    headers={"Content-Type": "application/octet-stream"},
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Content-Range": f"bytes 0-{file_size - 1}/{file_size}",
+                        "Content-Length": str(file_size),
+                    },
                 )
                 resp.raise_for_status()
 
