@@ -39,7 +39,8 @@ def mock_llm():
 
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
-    assert len(agent.STATIC_TOOLS) == 65
+    assert len(agent.STATIC_TOOLS) == len(agent.ALL_TOOLS)
+    assert len(agent.ALL_TOOLS) == 65
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -114,6 +115,78 @@ def test_system_prompt_defined(mock_llm):
     assert "FR2615441197" in agent.SYSTEM_PROMPT
     assert "Quote-ly/Fedramp" in agent.SYSTEM_PROMPT
     assert "fedramp_collect_evidence" in agent.SYSTEM_PROMPT or "fedramp_evidence_summary" in agent.SYSTEM_PROMPT
+
+
+def test_select_tool_groups_core_only(mock_llm):
+    """Simple query should get core + github (default fallback)."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("check the logs for errors")
+    names = {t.name for t in tools}
+    assert "query_cloud_logs" in names
+    assert "list_cloud_run_services" in names
+    # GitHub loaded as default fallback
+    assert "github_list_issues" in names
+    # FedRAMP/OSCAL should NOT be loaded
+    assert "fedramp_collect_evidence" not in names
+    assert "oscal_generate_ssp" not in names
+    assert "social_preview_post" not in names
+
+
+def test_select_tool_groups_fedramp(mock_llm):
+    """FedRAMP query should load fedramp tools."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("check the fedramp compliance status")
+    names = {t.name for t in tools}
+    assert "fedramp_collect_evidence" in names
+    assert "fedramp_evidence_summary" in names
+    assert "query_cloud_logs" in names  # core always loaded
+
+
+def test_select_tool_groups_oscal(mock_llm):
+    """OSCAL query should load OSCAL tools."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("generate the OSCAL SSP")
+    names = {t.name for t in tools}
+    assert "oscal_generate_ssp" in names
+    assert "oscal_validate_package" in names
+
+
+def test_select_tool_groups_troubleshoot(mock_llm):
+    """Troubleshoot query should load repo sync tools."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("troubleshoot the production errors")
+    names = {t.name for t in tools}
+    assert "sync_repo" in names
+    assert "read_repo_file" in names
+    assert "search_repo_code" in names
+
+
+def test_select_tool_groups_social(mock_llm):
+    """Social media query should load social tools."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("draft a linkedin post")
+    names = {t.name for t in tools}
+    assert "social_preview_post" in names
+    # Should NOT load repo/fedramp
+    assert "sync_repo" not in names
+    assert "fedramp_collect_evidence" not in names
+
+
+def test_select_tool_groups_multiple(mock_llm):
+    """Query touching multiple groups should load all relevant groups."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("check github issues and fedramp compliance")
+    names = {t.name for t in tools}
+    assert "github_list_issues" in names
+    assert "fedramp_collect_evidence" in names
+    assert "query_cloud_logs" in names  # core
+
+
+def test_select_tool_groups_much_smaller_than_all(mock_llm):
+    """Dynamic selection should return significantly fewer tools than ALL_TOOLS."""
+    _, agent = mock_llm
+    simple_tools = agent._select_tool_groups("check the logs")
+    assert len(simple_tools) < len(agent.ALL_TOOLS) / 2
 
 
 def test_needs_pro_model_for_oscal(mock_llm):

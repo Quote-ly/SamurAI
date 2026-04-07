@@ -37,21 +37,117 @@ from tools.repo_sync import REPO_SYNC_TOOLS
 
 logger = logging.getLogger(__name__)
 
-# Static tools — always available
-STATIC_TOOLS = [
-    query_cloud_logs,
-    list_cloud_run_services,
-    check_gcp_metrics,
-    github_list_prs,
-    github_get_pr_details,
-    github_list_recent_commits,
-    github_list_issues,
-    github_get_issue_details,
-    github_create_issue,
-    github_list_workflow_runs,
-    github_get_workflow_run_details,
-    github_close_issue,
-] + SOCIAL_TOOLS + PROJECT_TOOLS + [google_search] + BACKGROUND_TASK_TOOLS + TEAMS_MESSAGING_TOOLS + FEDRAMP_TOOLS + FEDRAMP_DOC_TOOLS + FEDRAMP_OSCAL_TOOLS + REPO_SYNC_TOOLS
+# ── Tool Groups ────────────────────────────────────────────────────────
+# Core tools are always loaded. Other groups load dynamically based on the request.
+
+TOOL_GROUPS = {
+    "core": {
+        "tools": [
+            query_cloud_logs,
+            list_cloud_run_services,
+            check_gcp_metrics,
+            google_search,
+        ] + BACKGROUND_TASK_TOOLS,
+        "keywords": [],  # Always loaded
+    },
+    "github": {
+        "tools": [
+            github_list_prs,
+            github_get_pr_details,
+            github_list_recent_commits,
+            github_list_issues,
+            github_get_issue_details,
+            github_create_issue,
+            github_list_workflow_runs,
+            github_get_workflow_run_details,
+            github_close_issue,
+        ] + PROJECT_TOOLS,
+        "keywords": [
+            "github", "pr", "pull request", "issue", "commit", "ci/cd",
+            "workflow", "actions", "deploy", "branch", "merge", "repo",
+            "project board", "project items",
+        ],
+    },
+    "fedramp": {
+        "tools": FEDRAMP_TOOLS,
+        "keywords": [
+            "fedramp", "compliance", "evidence", "audit log review",
+            "scc", "iam compliance", "log retention", "encryption",
+            "vulnerability", "dependabot", "poam", "poa&m",
+            "nist", "control family", "800-53",
+        ],
+    },
+    "oscal": {
+        "tools": FEDRAMP_OSCAL_TOOLS,
+        "keywords": [
+            "oscal", "ssp", "poam", "assessment result", "generate ssp",
+            "migrate", "catalog lookup", "look up control", "render pdf",
+            "validate package", "update control", "link evidence",
+        ],
+    },
+    "fedramp_docs": {
+        "tools": FEDRAMP_DOC_TOOLS,
+        "keywords": [
+            "fedramp document", "read document", "propose edit",
+            "commit document", "review code", "fedramp doc",
+            "search document", "list document",
+        ],
+    },
+    "social": {
+        "tools": SOCIAL_TOOLS,
+        "keywords": [
+            "social", "post", "linkedin", "twitter", "facebook",
+            "instagram", "publish", "schedule post", "preview post",
+            "ayrshare", "draft",
+        ],
+    },
+    "teams": {
+        "tools": TEAMS_MESSAGING_TOOLS,
+        "keywords": [
+            "send message", "send a message", "teams message",
+            "message to", "team roster", "lookup member", "team member",
+        ],
+    },
+    "repo": {
+        "tools": REPO_SYNC_TOOLS,
+        "keywords": [
+            "sync repo", "sync the", "pull the code", "read code",
+            "search code", "source code", "troubleshoot", "debug",
+            "codebase", "main.py", "config.py", "list files",
+        ],
+    },
+}
+
+# Flat list of ALL tools (for ToolNode which needs to execute any tool)
+ALL_TOOLS = []
+_seen = set()
+for group in TOOL_GROUPS.values():
+    for t in group["tools"]:
+        if id(t) not in _seen:
+            _seen.add(id(t))
+            ALL_TOOLS.append(t)
+
+# Keep STATIC_TOOLS for backward compat in tests
+STATIC_TOOLS = ALL_TOOLS
+
+
+def _select_tool_groups(message: str) -> list:
+    """Select which tool groups to activate based on the user's message."""
+    msg_lower = message.lower()
+    selected = list(TOOL_GROUPS["core"]["tools"])  # Always include core
+
+    for name, group in TOOL_GROUPS.items():
+        if name == "core":
+            continue
+        if any(kw in msg_lower for kw in group["keywords"]):
+            selected.extend(group["tools"])
+
+    # If no specific group matched, include github (most common)
+    non_core_matched = len(selected) > len(TOOL_GROUPS["core"]["tools"])
+    if not non_core_matched:
+        selected.extend(TOOL_GROUPS["github"]["tools"])
+
+    return selected
 
 SYSTEM_PROMPT = (
     "You are SamurAI, a DevOps and CRM assistant in Microsoft Teams. "
@@ -333,34 +429,38 @@ async def _build_graph(user_id: str = "default"):
     llm_flash = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", **_GCP_KWARGS)
     llm_pro = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", **_GCP_KWARGS)
 
-    # Combine static tools with user-specific VirtualDojo + memory tools
-    user_tools = (
-        STATIC_TOOLS
-        + [
-            create_virtualdojo_tool(user_id),
-            create_virtualdojo_list_tools(user_id),
-        ]
-        + create_memory_tools(user_id)
-    )
+    # User-specific tools (always included in every call)
+    user_specific_tools = [
+        create_virtualdojo_tool(user_id),
+        create_virtualdojo_list_tools(user_id),
+    ] + create_memory_tools(user_id)
 
-    flash_with_tools = llm_flash.bind_tools(user_tools)
-    pro_with_tools = llm_pro.bind_tools(user_tools)
-    tool_node = ToolNode(user_tools, handle_tool_errors=True)
+    # ToolNode needs ALL tools so it can execute whatever the LLM selected
+    all_tools = ALL_TOOLS + user_specific_tools
+    tool_node = ToolNode(all_tools, handle_tool_errors=True)
 
     async def call_model(state: MessagesState):
         messages = state["messages"]
 
         # Select model: Pro for OSCAL/FedRAMP doc/code review, Flash for everything else
         if _needs_pro_model(messages):
-            llm_with_tools = pro_with_tools
+            llm = llm_pro
         else:
-            llm_with_tools = flash_with_tools
+            llm = llm_flash
 
-        # Build system prompt, injecting any relevant long-term memories
-        system_content = SYSTEM_PROMPT
+        # Dynamically select tools based on the user's message
         last_human = next(
             (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
         )
+        if last_human:
+            selected_tools = _select_tool_groups(last_human.content) + user_specific_tools
+        else:
+            selected_tools = all_tools
+
+        llm_with_tools = llm.bind_tools(selected_tools)
+
+        # Build system prompt, injecting any relevant long-term memories
+        system_content = SYSTEM_PROMPT
         if last_human:
             memory_context = await retrieve_relevant_memories(
                 user_id, last_human.content
