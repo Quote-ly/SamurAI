@@ -363,7 +363,7 @@ def fill_spreadsheet_column(
         return "This tool only works with .xlsx files."
 
     try:
-        wb = load_workbook(io.BytesIO(file_info["content_bytes"]), data_only=True)
+        wb = load_workbook(io.BytesIO(file_info["content_bytes"]))
         ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.active
 
         # Get headers from row 1
@@ -410,6 +410,8 @@ def fill_spreadsheet_column(
 
                 ws.cell(row=row_num, column=target_col_idx + 1, value=result)
                 filled += 1
+                if filled <= 3:
+                    print(f"[fill_spreadsheet] row={row_num} col={target_col_idx + 1} value={str(result)[:80]}", flush=True)
             except Exception as e:
                 if len(errors) < 3:
                     errors.append(f"Row {row_num}: {e}")
