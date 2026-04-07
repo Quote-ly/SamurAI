@@ -15,6 +15,7 @@ aiohttp>=3.9
 aiosqlite>=0.20
 numpy>=2.0
 APScheduler>=3.10
+langmem>=0.0.30
 google-cloud-securitycenter>=1.0
 google-cloud-kms>=2.0
 google-cloud-alloydb>=0.1

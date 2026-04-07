@@ -9,7 +9,14 @@ from langgraph.prebuilt import ToolNode
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from memory import get_checkpointer, create_memory_tools, retrieve_relevant_memories
+from memory import (
+    get_checkpointer,
+    get_memory_store,
+    create_memory_tools,
+    retrieve_relevant_memories,
+    get_background_extractor,
+    persist_memories,
+)
 from tools.gcp_logging import query_cloud_logs
 from tools.gcp_monitoring import check_gcp_metrics
 from tools.gcp_cloudrun import list_cloud_run_services
@@ -229,12 +236,12 @@ SYSTEM_PROMPT = (
     "- NEVER use generic SaaS speak or forced enthusiasm\n"
     "- NEVER use em dashes (—) in social media posts. Use periods, commas, or line breaks instead.\n\n"
     "Long-term Memory:\n"
-    "You have a persistent memory system that survives across conversations and restarts.\n"
-    "- Use save_memory to remember important facts: user preferences, project context, "
-    "key decisions, team information, or anything valuable for future conversations.\n"
-    "- Use recall_memories to search for relevant past context when needed.\n"
-    "- Relevant memories are automatically retrieved and shown when available.\n"
-    "- Save memories proactively when users share important context or preferences.\n"
+    "You have a persistent memory system powered by LangMem.\n"
+    "- Use manage_memory to save, update, or delete facts and preferences.\n"
+    "- Use search_memory to find relevant past context.\n"
+    "- Memories are also automatically extracted from conversations in the background.\n"
+    "- Save memories proactively when users share important context.\n"
+    "- Update existing memories when information changes rather than creating duplicates.\n"
     "- Do NOT save trivial or transient information (e.g., 'user asked about logs').\n\n"
     "GitHub Projects:\n"
     "You can manage GitHub Projects V2 in the Quote-ly organization.\n"
@@ -487,7 +494,8 @@ async def _build_graph(user_id: str = "default"):
     graph.add_edge("tools", "agent")
 
     checkpointer = await get_checkpointer()
-    return graph.compile(checkpointer=checkpointer)
+    store = get_memory_store()
+    return graph.compile(checkpointer=checkpointer, store=store)
 
 
 # Cache of per-user graphs to avoid rebuilding on every message
@@ -663,4 +671,28 @@ async def run_agent(
     if not final_messages:
         logger.error("[run_agent] empty messages in result for thread=%s", conversation_id)
         return "I wasn't able to generate a response. Please try again."
-    return _extract_text(final_messages[-1].content)
+
+    response_text = _extract_text(final_messages[-1].content)
+
+    # Background memory extraction — auto-saves facts from conversation
+    try:
+        executor = get_background_extractor()
+        executor.submit(
+            {"messages": [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": response_text},
+            ]},
+            config={"configurable": {"user_id": user_id}},
+            after_seconds=1.0,
+        )
+    except Exception as e:
+        logger.debug("Background memory extraction failed: %s", e)
+
+    # Periodic persistence — flush memories to SQLite every call
+    # (lightweight no-op if nothing changed)
+    try:
+        persist_memories()
+    except Exception:
+        pass
+
+    return response_text

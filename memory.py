@@ -1,166 +1,150 @@
-"""Persistent vector memory store using SQLite + Vertex AI embeddings.
+"""Memory system using LangMem + LangGraph InMemoryStore with SQLite persistence.
 
-Provides two persistence layers:
-1. AsyncSqliteSaver — LangGraph checkpointer for conversation history
-2. VectorMemoryStore — long-term semantic memory with embedding search
+Provides:
+1. LangGraph InMemoryStore — fast in-RAM memory with semantic search
+2. LangMem tools — manage_memory + search_memory for the agent
+3. Background extraction — auto-extracts memories after conversations
+4. SQLite persistence — periodic flush to GCS for survival across restarts
+5. AsyncSqliteSaver — LangGraph checkpointer for conversation history
 """
 
+import json
 import logging
 import os
 import time
-import uuid
 
 logger = logging.getLogger(__name__)
 
 DATA_DIR = os.environ.get("SAMURAI_DATA_DIR", "/data")
-MEMORY_DB_PATH = os.path.join(DATA_DIR, "memory.sqlite")
-# Checkpoints on local SSD (/tmp) — too write-heavy for GCS FUSE.
-# Conversation history is ephemeral and rebuilt from memory on restart.
+MEMORY_DB_PATH = os.path.join(DATA_DIR, "langmem_memories.sqlite")
+# Checkpoints on local SSD — too write-heavy for GCS FUSE
 CHECKPOINT_DB_PATH = "/tmp/checkpoints.sqlite"
 
-# Minimum cosine similarity for a memory to be considered relevant
-SIMILARITY_THRESHOLD = 0.5
-
 # Singletons
-_memory_store = None
+_store = None
 _checkpointer = None
 _checkpoint_conn = None
+_background_executor = None
 
 
-class VectorMemoryStore:
-    """SQLite-backed vector store with cosine similarity search."""
+# ── Vertex AI Embedding Function ──────────────────────────────────────
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._embeddings = None
 
-    @property
-    def embeddings(self):
-        if self._embeddings is None:
+def _create_embed_fn():
+    """Create an embedding function using Vertex AI."""
+    _embeddings = None
+
+    def embed(texts: list[str]) -> list[list[float]]:
+        nonlocal _embeddings
+        if _embeddings is None:
             from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-            self._embeddings = GoogleGenerativeAIEmbeddings(
+            _embeddings = GoogleGenerativeAIEmbeddings(
                 model="text-embedding-005",
                 project=os.environ.get("GCP_PROJECT_ID"),
                 task_type="RETRIEVAL_DOCUMENT",
                 dimensions=1536,
             )
-        return self._embeddings
+        return _embeddings.embed_documents(texts)
 
-    async def initialize(self):
-        """Create the memories table if it doesn't exist."""
-        import aiosqlite
-
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("PRAGMA journal_mode=DELETE")
-            await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS memories (
-                    id TEXT PRIMARY KEY,
-                    user_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    embedding BLOB NOT NULL,
-                    created_at REAL NOT NULL
-                )
-                """
-            )
-            await db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_memories_user ON memories(user_id)"
-            )
-            await db.commit()
-
-    async def _embed(self, text: str):
-        """Generate an embedding vector for text."""
-        import numpy as np
-
-        vectors = await self.embeddings.aembed_documents([text])
-        return np.array(vectors[0], dtype=np.float32)
-
-    async def add(self, user_id: str, content: str) -> str:
-        """Save a memory with its embedding vector."""
-        import aiosqlite
-
-        embedding = await self._embed(content)
-        memory_id = str(uuid.uuid4())[:8]
-        async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(
-                "INSERT INTO memories (id, user_id, content, embedding, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (memory_id, user_id, content, embedding.tobytes(), time.time()),
-            )
-            await db.commit()
-        return memory_id
-
-    async def search(self, user_id: str, query: str, top_k: int = 5) -> list[dict]:
-        """Semantic search over a user's memories using cosine similarity."""
-        import aiosqlite
-        import numpy as np
-
-        query_embedding = await self._embed(query)
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT id, content, embedding, created_at "
-                "FROM memories WHERE user_id = ?",
-                (user_id,),
-            )
-            rows = await cursor.fetchall()
-
-        if not rows:
-            return []
-
-        results = []
-        for row in rows:
-            stored = np.frombuffer(row[2], dtype=np.float32)
-            norm_product = np.linalg.norm(query_embedding) * np.linalg.norm(stored)
-            similarity = float(
-                np.dot(query_embedding, stored) / (norm_product + 1e-10)
-            )
-            results.append(
-                {
-                    "id": row[0],
-                    "content": row[1],
-                    "similarity": similarity,
-                    "created_at": row[3],
-                }
-            )
-
-        results.sort(key=lambda x: x["similarity"], reverse=True)
-        return results[:top_k]
-
-    async def list_memories(self, user_id: str) -> list[dict]:
-        """List all memories for a user, newest first."""
-        import aiosqlite
-
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "SELECT id, content, created_at FROM memories "
-                "WHERE user_id = ? ORDER BY created_at DESC",
-                (user_id,),
-            )
-            rows = await cursor.fetchall()
-        return [{"id": r[0], "content": r[1], "created_at": r[2]} for r in rows]
-
-    async def delete(self, memory_id: str) -> bool:
-        """Delete a memory by ID. Returns True if found and deleted."""
-        import aiosqlite
-
-        async with aiosqlite.connect(self.db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM memories WHERE id = ?", (memory_id,)
-            )
-            await db.commit()
-            return cursor.rowcount > 0
+    return embed
 
 
-async def get_memory_store() -> VectorMemoryStore:
-    """Get or create the singleton vector memory store."""
-    global _memory_store
-    if _memory_store is None:
+# ── Memory Store (InMemoryStore + SQLite persistence) ─────────────────
+
+
+def get_memory_store():
+    """Get the singleton LangGraph InMemoryStore with embedding search."""
+    global _store
+    if _store is None:
+        from langgraph.store.memory import InMemoryStore
+
+        _store = InMemoryStore(
+            index={
+                "dims": 1536,
+                "embed": _create_embed_fn(),
+            }
+        )
+        # Load persisted memories from SQLite
+        _load_persisted_memories(_store)
+        logger.info("LangMem memory store ready (InMemoryStore + SQLite backup)")
+    return _store
+
+
+def _load_persisted_memories(store):
+    """Load memories from SQLite into the InMemoryStore on startup."""
+    import sqlite3
+
+    if not os.path.exists(MEMORY_DB_PATH):
+        return
+
+    try:
+        conn = sqlite3.connect(MEMORY_DB_PATH)
+        cursor = conn.execute(
+            "SELECT namespace, key, value_json, created_at, updated_at FROM memories"
+        )
+        count = 0
+        for row in cursor:
+            namespace = tuple(json.loads(row[0]))
+            key = row[1]
+            value = json.loads(row[2])
+            store.put(namespace, key, value)
+            count += 1
+        conn.close()
+        if count:
+            logger.info("Loaded %d persisted memories from SQLite", count)
+    except Exception as e:
+        logger.warning("Failed to load persisted memories: %s", e)
+
+
+def persist_memories():
+    """Flush the InMemoryStore to SQLite for persistence across restarts."""
+    import sqlite3
+
+    if _store is None:
+        return
+
+    try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        _memory_store = VectorMemoryStore(MEMORY_DB_PATH)
-        await _memory_store.initialize()
-        logger.info("Vector memory store ready: %s", MEMORY_DB_PATH)
-    return _memory_store
+        conn = sqlite3.connect(MEMORY_DB_PATH)
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS memories (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value_json TEXT NOT NULL,
+                created_at TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (namespace, key)
+            )"""
+        )
+
+        # Get all items from the store by searching known namespaces
+        # InMemoryStore stores items internally — we iterate via _data
+        items_saved = 0
+        if hasattr(_store, '_data'):
+            for namespace_tuple, keys in _store._data.items():
+                ns_json = json.dumps(list(namespace_tuple))
+                for key, item in keys.items():
+                    value_json = json.dumps(item.value)
+                    created = getattr(item, 'created_at', '')
+                    updated = getattr(item, 'updated_at', '')
+                    conn.execute(
+                        """INSERT OR REPLACE INTO memories
+                           (namespace, key, value_json, created_at, updated_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (ns_json, key, value_json, str(created), str(updated)),
+                    )
+                    items_saved += 1
+
+        conn.commit()
+        conn.close()
+        if items_saved:
+            logger.info("Persisted %d memories to SQLite", items_saved)
+    except Exception as e:
+        logger.warning("Failed to persist memories: %s", e)
+
+
+# ── Checkpointer ─────────────────────────────────────────────────────
 
 
 async def get_checkpointer():
@@ -171,7 +155,6 @@ async def get_checkpointer():
             import aiosqlite
             from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-            os.makedirs(DATA_DIR, exist_ok=True)
             _checkpoint_conn = await aiosqlite.connect(CHECKPOINT_DB_PATH)
             _checkpointer = AsyncSqliteSaver(_checkpoint_conn)
             await _checkpointer.setup()
@@ -186,94 +169,95 @@ async def get_checkpointer():
     return _checkpointer
 
 
+# ── LangMem Memory Tools ─────────────────────────────────────────────
+
+
 def create_memory_tools(user_id: str) -> list:
-    """Create memory management tools scoped to a specific user."""
-    from langchain_core.tools import tool
+    """Create LangMem memory tools scoped to a specific user."""
+    from langmem import create_manage_memory_tool, create_search_memory_tool
 
-    @tool
-    async def save_memory(content: str) -> str:
-        """Save an important fact or preference to long-term memory.
-        Use this to remember user preferences, project context, key decisions,
-        or anything that should persist across conversations.
+    store = get_memory_store()
+    return [
+        create_manage_memory_tool(
+            namespace=("memories", "{user_id}"),
+            instructions=(
+                "Save important facts about users, projects, preferences, "
+                "and key decisions. Update existing memories when information "
+                "changes rather than creating duplicates. Delete outdated memories. "
+                "Focus on: user preferences, project context, team information, "
+                "infrastructure details, and recurring patterns."
+            ),
+            store=store,
+        ),
+        create_search_memory_tool(
+            namespace=("memories", "{user_id}"),
+            store=store,
+        ),
+    ]
 
-        Args:
-            content: The fact or information to remember.
-        """
-        store = await get_memory_store()
-        memory_id = await store.add(user_id, content)
-        return f"Saved to memory (id: {memory_id})"
 
-    @tool
-    async def recall_memories(query: str) -> str:
-        """Search long-term memory for relevant past context.
-        Use this to find previously saved information about users, projects,
-        or decisions.
+# ── Background Memory Extraction ─────────────────────────────────────
 
-        Args:
-            query: What to search for in memory.
-        """
-        store = await get_memory_store()
-        results = await store.search(user_id, query, top_k=5)
-        relevant = [r for r in results if r["similarity"] > SIMILARITY_THRESHOLD]
-        if not relevant:
-            return "No relevant memories found."
-        from datetime import datetime
 
-        lines = []
-        for r in relevant:
-            ts = datetime.fromtimestamp(r["created_at"]).strftime("%Y-%m-%d")
-            lines.append(
-                f"- [{r['id']}] ({ts}) {r['content']} "
-                f"[relevance: {r['similarity']:.0%}]"
-            )
-        return "Recalled memories:\n" + "\n".join(lines)
+def get_background_extractor():
+    """Get the singleton background memory extractor.
 
-    @tool
-    async def list_all_memories() -> str:
-        """List all saved memories for the current user."""
-        store = await get_memory_store()
-        memories = await store.list_memories(user_id)
-        if not memories:
-            return "No memories saved yet."
-        from datetime import datetime
+    Automatically extracts and consolidates memories from conversations
+    without the agent needing to explicitly call save_memory.
+    """
+    global _background_executor
+    if _background_executor is None:
+        from langmem import create_memory_store_manager, ReflectionExecutor
 
-        lines = []
-        for m in memories:
-            ts = datetime.fromtimestamp(m["created_at"]).strftime("%Y-%m-%d")
-            lines.append(f"- [{m['id']}] ({ts}) {m['content']}")
-        return f"All memories ({len(memories)}):\n" + "\n".join(lines)
+        store = get_memory_store()
+        manager = create_memory_store_manager(
+            "google_genai:gemini-2.0-flash-lite",
+            namespace=("memories", "{user_id}"),
+            store=store,
+            enable_inserts=True,
+            enable_updates=True,
+            enable_deletes=True,
+            instructions=(
+                "Extract important facts, preferences, and decisions from the conversation. "
+                "Update existing memories if information has changed. "
+                "Delete memories that are contradicted by new information. "
+                "Focus on: user preferences, project context, team information, "
+                "infrastructure details, and recurring patterns. "
+                "Do NOT save trivial information like greetings or routine status checks."
+            ),
+        )
+        _background_executor = ReflectionExecutor(manager)
+        logger.info("Background memory extractor ready")
+    return _background_executor
 
-    @tool
-    async def forget_memory(memory_id: str) -> str:
-        """Delete a specific memory by its ID.
 
-        Args:
-            memory_id: The ID of the memory to delete.
-        """
-        store = await get_memory_store()
-        deleted = await store.delete(memory_id)
-        if deleted:
-            return f"Memory {memory_id} deleted."
-        return f"Memory {memory_id} not found."
-
-    return [save_memory, recall_memories, list_all_memories, forget_memory]
+# ── Auto-Retrieval for System Prompt Injection ────────────────────────
 
 
 async def retrieve_relevant_memories(user_id: str, query: str) -> str | None:
     """Auto-retrieve relevant memories for injection into system prompt.
 
     Returns a formatted string of relevant memories, or None if nothing found.
-    Silently returns None on any error to avoid breaking the agent.
     """
     try:
-        store = await get_memory_store()
-        results = await store.search(user_id, query, top_k=3)
-        relevant = [r for r in results if r["similarity"] > SIMILARITY_THRESHOLD]
-        if not relevant:
+        store = get_memory_store()
+        results = store.search(
+            ("memories", user_id),
+            query=query,
+            limit=5,
+        )
+        if not results:
             return None
-        lines = [f"- {r['content']}" for r in relevant]
+        lines = []
+        for r in results:
+            val = r.value
+            if isinstance(val, dict):
+                content = val.get("content", json.dumps(val))
+            else:
+                content = str(val)
+            lines.append(f"- {content}")
         return (
-            "Relevant context from past conversations with this user:\n"
+            "Relevant context from past conversations:\n"
             + "\n".join(lines)
         )
     except Exception as e:

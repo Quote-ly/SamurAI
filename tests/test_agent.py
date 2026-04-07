@@ -18,6 +18,9 @@ def mock_llm():
             return_value=None,
         ),
         patch("memory.create_memory_tools", return_value=[]),
+        patch("memory.get_memory_store", return_value=MagicMock()),
+        patch("memory.get_background_extractor", return_value=MagicMock()),
+        patch("memory.persist_memories"),
     ):
         mock_instance = MagicMock()
         mock_instance.bind_tools.return_value = mock_instance
@@ -40,7 +43,7 @@ def mock_llm():
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
     assert len(agent.STATIC_TOOLS) == len(agent.ALL_TOOLS)
-    assert len(agent.ALL_TOOLS) == 65
+    assert len(agent.ALL_TOOLS) == 65  # Static tools (memory tools added per-user separately)
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -103,7 +106,7 @@ def test_system_prompt_defined(mock_llm):
     assert "DevOps" in agent.SYSTEM_PROMPT
     assert "VirtualDojo CRM" in agent.SYSTEM_PROMPT
     assert "Long-term Memory" in agent.SYSTEM_PROMPT
-    assert "save_memory" in agent.SYSTEM_PROMPT
+    assert "manage_memory" in agent.SYSTEM_PROMPT
     # Autonomous agent capabilities
     assert "FULLY AUTONOMOUS" in agent.SYSTEM_PROMPT
     assert "Background Tasks" in agent.SYSTEM_PROMPT or "background_task" in agent.SYSTEM_PROMPT
