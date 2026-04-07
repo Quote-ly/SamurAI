@@ -361,6 +361,7 @@ async def on_message(turn_context: TurnContext):
         # Store the bytes for the upload callback
         from tools.file_handler import _pending_edited_files as _pef_store
         _pef_store[f"_upload_{conversation_id}"] = edited_file
+        print(f"[edited_file] Stored {file_size} bytes for consent upload, conv={conversation_id}", flush=True)
 
         await turn_context.send_activity(
             Activity(
@@ -467,10 +468,12 @@ async def _handle_file_consent(turn_context: TurnContext):
             )
             return
 
-        # Get the pending file content — check FedRAMP docs first, then edited files
+        # Get the pending file content — check edited files first, then FedRAMP docs
         from tools.file_handler import _pending_edited_files as _edit_store
-        pending = _pending_file_uploads.get(conversation_id)
         edited = _edit_store.pop(f"_upload_{conversation_id}", None)
+        pending = _pending_file_uploads.get(conversation_id) if not edited else None
+
+        print(f"[file_consent] edited={bool(edited)} pending={bool(pending)} conv={conversation_id}", flush=True)
 
         if not pending and not edited:
             await turn_context.send_activity(
@@ -484,9 +487,11 @@ async def _handle_file_consent(turn_context: TurnContext):
 
             if edited:
                 file_bytes = edited["content_bytes"]
+                print(f"[file_consent] Using edited file: {len(file_bytes)} bytes", flush=True)
             else:
                 content = pending.get("content", "")
                 file_bytes = content.encode("utf-8") if isinstance(content, str) else content
+                print(f"[file_consent] Using pending file: {len(file_bytes)} bytes", flush=True)
             file_size = len(file_bytes)
             async with httpx.AsyncClient() as client:
                 resp = await client.put(
