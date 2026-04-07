@@ -162,6 +162,11 @@ SYSTEM_PROMPT = (
     "You help the team check Google Cloud infrastructure, read logs, "
     "monitor services, review GitHub activity, and query VirtualDojo CRM data. "
     "Be concise and use markdown formatting when it helps readability.\n\n"
+    "EFFICIENCY: You have a budget of 15 tool calls per request. Be strategic:\n"
+    "- Call multiple tools in parallel when possible (return multiple tool_calls at once).\n"
+    "- Don't make redundant calls — if you already checked something, don't check it again.\n"
+    "- After gathering enough information, synthesize and respond. Don't keep investigating.\n"
+    "- If you hit your tool budget, respond with what you have and offer to continue.\n\n"
     "IMPORTANT — GCP project IDs you have access to:\n"
     "- virtualdojo-samurai (this bot)\n"
     "- virtualdojo-fedramp-dev (FedRAMP dev environment)\n"
@@ -481,11 +486,21 @@ async def _build_graph(user_id: str = "default"):
 
         return {"messages": [await llm_with_tools.ainvoke(messages)]}
 
+    MAX_TOOL_ITERATIONS = 15
+
     def should_continue(state: MessagesState):
         last = state["messages"][-1]
-        if last.tool_calls:
-            return "tools"
-        return END
+        if not last.tool_calls:
+            return END
+
+        # Count how many tool call rounds have happened
+        from langchain_core.messages import ToolMessage
+        tool_rounds = sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
+        if tool_rounds >= MAX_TOOL_ITERATIONS:
+            logger.warning("Hit max tool iterations (%d), forcing response", MAX_TOOL_ITERATIONS)
+            return END
+
+        return "tools"
 
     graph = StateGraph(MessagesState)
     graph.add_node("agent", call_model)
