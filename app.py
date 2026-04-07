@@ -498,13 +498,28 @@ async def _handle_file_consent(turn_context: TurnContext):
             }
 
             file_name = upload_info.get("name", "file")
-            if content_url:
-                msg = f"File uploaded: [{file_name}]({content_url})"
-            else:
-                msg = f"File uploaded: **{file_name}** (check your OneDrive)"
+            unique_id = upload_info.get("uniqueId", "")
+            file_type = upload_info.get("fileType", "")
 
+            # Send a Teams file info card — renders as a clickable file in chat
+            from botbuilder.schema import Attachment
+
+            file_info_card = {
+                "uniqueId": unique_id,
+                "fileType": file_type,
+            }
             await turn_context.send_activity(
-                Activity(type="message", text=msg)
+                Activity(
+                    type="message",
+                    attachments=[
+                        Attachment(
+                            content_type="application/vnd.microsoft.teams.card.file.info",
+                            name=file_name,
+                            content=file_info_card,
+                            content_url=content_url,
+                        )
+                    ],
+                )
             )
         except Exception as e:
             print(f"[file_consent] Upload failed: {e}", flush=True)
