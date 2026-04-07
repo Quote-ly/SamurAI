@@ -14,7 +14,9 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = os.environ.get("SAMURAI_DATA_DIR", "/data")
 MEMORY_DB_PATH = os.path.join(DATA_DIR, "memory.sqlite")
-CHECKPOINT_DB_PATH = os.path.join(DATA_DIR, "checkpoints.sqlite")
+# Checkpoints on local SSD (/tmp) — too write-heavy for GCS FUSE.
+# Conversation history is ephemeral and rebuilt from memory on restart.
+CHECKPOINT_DB_PATH = "/tmp/checkpoints.sqlite"
 
 # Minimum cosine similarity for a memory to be considered relevant
 SIMILARITY_THRESHOLD = 0.5
