@@ -492,6 +492,8 @@ async def run_agent(
     }
 
     final_messages = []
+    _sent_statuses: set[str] = set()  # Track sent labels to avoid duplicates
+
     async for event in graph.astream(
         {"messages": [HumanMessage(content=message)]},
         config=config,
@@ -500,17 +502,24 @@ async def run_agent(
         # event is a dict like {"agent": {"messages": [...]}} or {"tools": {"messages": [...]}}
         if "agent" in event:
             final_messages = event["agent"].get("messages", [])
-            # Check if the agent is about to call tools — send a status update
+            # Check if the agent is about to call tools — send one status update
             if status_callback and final_messages:
                 last_msg = final_messages[-1]
                 if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                     tool_names = [tc.get("name", "") for tc in last_msg.tool_calls]
-                    labels = [_tool_labels.get(n, n) for n in tool_names]
-                    status = "..." + ", ".join(labels) + "..."
-                    try:
-                        await status_callback(status)
-                    except Exception:
-                        pass  # Don't break the agent loop for status failures
+                    # Deduplicate — only send labels we haven't sent before
+                    new_labels = []
+                    for n in tool_names:
+                        label = _tool_labels.get(n, n)
+                        if label not in _sent_statuses:
+                            _sent_statuses.add(label)
+                            new_labels.append(label)
+                    if new_labels:
+                        status = "_" + ", ".join(new_labels) + "..._"
+                        try:
+                            await status_callback(status)
+                        except Exception:
+                            pass
 
         elif "tools" in event:
             final_messages = event["tools"].get("messages", [])
