@@ -487,8 +487,10 @@ async def _build_graph(user_id: str = "default"):
         return {"messages": [await llm_with_tools.ainvoke(messages)]}
 
     MAX_TOOL_ITERATIONS = 15
+    _hit_limit = False
 
     def should_continue(state: MessagesState):
+        nonlocal _hit_limit
         last = state["messages"][-1]
         if not last.tool_calls:
             return END
@@ -497,17 +499,36 @@ async def _build_graph(user_id: str = "default"):
         from langchain_core.messages import ToolMessage
         tool_rounds = sum(1 for m in state["messages"] if isinstance(m, ToolMessage))
         if tool_rounds >= MAX_TOOL_ITERATIONS:
-            logger.warning("Hit max tool iterations (%d), forcing response", MAX_TOOL_ITERATIONS)
-            return END
+            logger.warning("Hit max tool iterations (%d), forcing summary", MAX_TOOL_ITERATIONS)
+            _hit_limit = True
+            # Route to "summarize" node instead of END — gives LLM one more call to respond
+            return "summarize"
 
         return "tools"
+
+    async def summarize_and_respond(state: MessagesState):
+        """Force the LLM to synthesize collected tool results into a response."""
+        messages = state["messages"]
+        # Add instruction to summarize
+        messages = messages + [
+            SystemMessage(content=(
+                "You have reached your tool call limit. Do NOT call any more tools. "
+                "Synthesize ALL the tool results you've collected so far into a comprehensive "
+                "response for the user. Include all findings, data, and recommendations. "
+                "If there's more to investigate, mention what you'd check next."
+            ))
+        ]
+        # Use flash for speed — this is just summarization
+        return {"messages": [await llm_flash.ainvoke(messages)]}
 
     graph = StateGraph(MessagesState)
     graph.add_node("agent", call_model)
     graph.add_node("tools", tool_node)
+    graph.add_node("summarize", summarize_and_respond)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges("agent", should_continue)
     graph.add_edge("tools", "agent")
+    graph.add_edge("summarize", END)
 
     checkpointer = await get_checkpointer()
     store = get_memory_store()
