@@ -420,6 +420,8 @@ def _needs_pro_model(messages) -> bool:
     return any(kw in content for kw in PRO_MODEL_KEYWORDS)
 
 
+SOFT_TOOL_LIMIT = 15  # Send a "still working" notice after this many unique tool calls
+
 _GCP_KWARGS = dict(
     project=os.environ.get("GCP_PROJECT_ID"),
     location="global",
@@ -485,9 +487,6 @@ async def _build_graph(user_id: str = "default"):
             messages = [SystemMessage(content=system_content)] + messages
 
         return {"messages": [await llm_with_tools.ainvoke(messages)]}
-
-    SOFT_TOOL_LIMIT = 15
-    _sent_midstream_summary = False
 
     def should_continue(state: MessagesState):
         last = state["messages"][-1]
@@ -695,6 +694,7 @@ async def run_agent(
 
     final_messages = []
     _sent_statuses: set[str] = set()  # Track sent labels to avoid duplicates
+    _sent_midstream_summary = False
 
     async for event in graph.astream(
         {"messages": [HumanMessage(content=message)]},
