@@ -299,6 +299,15 @@ async def on_message(turn_context: TurnContext):
             response = await agent_task
         except asyncio.CancelledError:
             return  # User said "stop" — already handled
+        except Exception as e:
+            if "recursion limit" in str(e).lower() or "GraphRecursionError" in type(e).__name__:
+                await turn_context.send_activity(
+                    "I ran out of steps before finishing — this one's more complex than I expected. "
+                    "Want me to keep going from where I left off, or should I focus on a specific part?"
+                )
+                print(f"[on_message] GraphRecursionError for {user_name}: {e}", flush=True)
+                return
+            raise
         finally:
             _running_tasks.pop(conversation_id, None)
             _pending_task_context.pop(conversation_id, None)

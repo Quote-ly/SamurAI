@@ -20,11 +20,18 @@ MEMORY_DB_PATH = os.path.join(DATA_DIR, "langmem_memories.sqlite")
 # Checkpoints on local SSD — too write-heavy for GCS FUSE
 CHECKPOINT_DB_PATH = "/tmp/checkpoints.sqlite"
 
+# Three-tier memory namespaces
+CORE_NAMESPACE = ("core",)  # Operational knowledge — available to all users
+TEAM_NAMESPACE = ("team", "virtualdojo")  # Internal team knowledge — team only
+USER_NAMESPACE = ("memories", "{user_id}")  # Personal preferences — per user
+
 # Singletons
 _store = None
 _checkpointer = None
 _checkpoint_conn = None
 _background_executor = None
+_core_executor = None
+_team_executor = None
 
 
 # ── Vertex AI Embedding Function ──────────────────────────────────────
@@ -173,24 +180,60 @@ async def get_checkpointer():
 
 
 def create_memory_tools(user_id: str) -> list:
-    """Create LangMem memory tools scoped to a specific user."""
+    """Create LangMem memory tools for all three memory tiers."""
     from langmem import create_manage_memory_tool, create_search_memory_tool
 
     store = get_memory_store()
     return [
+        # User memory — personal preferences, per-individual
         create_manage_memory_tool(
-            namespace=("memories", "{user_id}"),
+            namespace=USER_NAMESPACE,
+            name="manage_memory",
             instructions=(
-                "Save important facts about users, projects, preferences, "
-                "and key decisions. Update existing memories when information "
-                "changes rather than creating duplicates. Delete outdated memories. "
-                "Focus on: user preferences, project context, team information, "
-                "infrastructure details, and recurring patterns."
+                "Save personal facts about this specific user: preferences, "
+                "communication style, role, and individual context. "
+                "Update existing memories when information changes rather than "
+                "creating duplicates. Delete outdated memories."
             ),
             store=store,
         ),
         create_search_memory_tool(
-            namespace=("memories", "{user_id}"),
+            namespace=USER_NAMESPACE,
+            name="search_memory",
+            store=store,
+        ),
+        # Core memory — operational knowledge, shared with ALL users
+        create_manage_memory_tool(
+            namespace=CORE_NAMESPACE,
+            name="manage_core_memory",
+            instructions=(
+                "Save operational knowledge about how this bot works effectively: "
+                "successful tool call patterns, troubleshooting recipes, workflow tips, "
+                "and error resolution strategies. These are available to ALL users. "
+                "Do NOT save user-specific preferences here."
+            ),
+            store=store,
+        ),
+        create_search_memory_tool(
+            namespace=CORE_NAMESPACE,
+            name="search_core_memory",
+            store=store,
+        ),
+        # Team memory — VirtualDojo internal knowledge, team only
+        create_manage_memory_tool(
+            namespace=TEAM_NAMESPACE,
+            name="manage_team_memory",
+            instructions=(
+                "Save VirtualDojo team-specific knowledge: project decisions, "
+                "infrastructure facts, internal processes, team conventions. "
+                "Do NOT save personal preferences (use manage_memory) or generic "
+                "operational knowledge (use manage_core_memory)."
+            ),
+            store=store,
+        ),
+        create_search_memory_tool(
+            namespace=TEAM_NAMESPACE,
+            name="search_team_memory",
             store=store,
         ),
     ]
@@ -212,17 +255,17 @@ def get_background_extractor():
         store = get_memory_store()
         manager = create_memory_store_manager(
             "google_genai:gemini-2.0-flash-lite",
-            namespace=("memories", "{user_id}"),
+            namespace=USER_NAMESPACE,
             store=store,
             enable_inserts=True,
-            enable_updates=True,
             enable_deletes=True,
             instructions=(
-                "Extract important facts, preferences, and decisions from the conversation. "
+                "Extract PERSONAL facts about this specific user: preferences, "
+                "communication style, role-specific context, and individual work patterns. "
                 "Update existing memories if information has changed. "
                 "Delete memories that are contradicted by new information. "
-                "Focus on: user preferences, project context, team information, "
-                "infrastructure details, and recurring patterns. "
+                "Do NOT save team-level knowledge or general operational patterns here — "
+                "those are handled by separate extractors. "
                 "Do NOT save trivial information like greetings or routine status checks."
             ),
         )
@@ -231,35 +274,132 @@ def get_background_extractor():
     return _background_executor
 
 
+def get_core_extractor():
+    """Get the singleton background extractor for core operational knowledge.
+
+    Core memories are shared across ALL users (including future external users).
+    They capture reusable tool patterns, troubleshooting recipes, and workflow knowledge.
+    """
+    global _core_executor
+    if _core_executor is None:
+        from langmem import create_memory_store_manager, ReflectionExecutor
+
+        store = get_memory_store()
+        manager = create_memory_store_manager(
+            "google_genai:gemini-2.0-flash-lite",
+            namespace=CORE_NAMESPACE,
+            store=store,
+            enable_inserts=True,
+            enable_deletes=True,
+            instructions=(
+                "Extract OPERATIONAL KNOWLEDGE from this conversation that would help "
+                "any user of this bot work more effectively. Focus on:\n"
+                "- Successful tool call patterns and sequences (e.g., 'To check autofix "
+                "status, search PRs for branches matching bugfix/issue-{N}')\n"
+                "- Troubleshooting recipes (e.g., 'Gemini 429 errors are transient, "
+                "retry usually succeeds')\n"
+                "- Workflow knowledge (e.g., 'After deploying, check new revision logs "
+                "not old revision')\n"
+                "- Error patterns and their solutions\n"
+                "- API behaviors and quirks discovered through tool usage\n\n"
+                "Do NOT extract:\n"
+                "- User preferences or personal details\n"
+                "- Transient information (greetings, routine status checks)\n"
+                "- Information that is only relevant to a specific user\n"
+                "- Raw data or logs (extract the LESSON, not the data)\n\n"
+                "Write memories as reusable recipes or facts that would help a future "
+                "agent session solve similar problems faster."
+            ),
+        )
+        _core_executor = ReflectionExecutor(manager)
+        logger.info("Core memory extractor ready")
+    return _core_executor
+
+
+def get_team_extractor():
+    """Get the singleton background extractor for team knowledge.
+
+    Team memories are shared within VirtualDojo but NOT with external users.
+    They capture project decisions, infrastructure facts, and internal processes.
+    """
+    global _team_executor
+    if _team_executor is None:
+        from langmem import create_memory_store_manager, ReflectionExecutor
+
+        store = get_memory_store()
+        manager = create_memory_store_manager(
+            "google_genai:gemini-2.0-flash-lite",
+            namespace=TEAM_NAMESPACE,
+            store=store,
+            enable_inserts=True,
+            enable_deletes=True,
+            instructions=(
+                "Extract TEAM KNOWLEDGE from this conversation that is specific to "
+                "the VirtualDojo team and its projects. Focus on:\n"
+                "- Project decisions and architecture choices\n"
+                "- Infrastructure facts (e.g., 'quotely-data-service uses "
+                "claude_automation/bugfix for autofix')\n"
+                "- Internal processes (e.g., 'FedRAMP evidence collection runs monthly')\n"
+                "- Team conventions and workflows\n"
+                "- Service configurations and deployment patterns\n"
+                "- Repository structure and branch strategies\n\n"
+                "Do NOT extract:\n"
+                "- Individual user preferences (those go to user memory)\n"
+                "- Generic operational knowledge not specific to VirtualDojo\n"
+                "- Transient information (greetings, routine status checks)\n\n"
+                "Write memories as team-level facts that any VirtualDojo team member "
+                "would benefit from knowing."
+            ),
+        )
+        _team_executor = ReflectionExecutor(manager)
+        logger.info("Team memory extractor ready")
+    return _team_executor
+
+
 # ── Auto-Retrieval for System Prompt Injection ────────────────────────
 
 
-async def retrieve_relevant_memories(user_id: str, query: str) -> str | None:
-    """Auto-retrieve relevant memories for injection into system prompt.
+def _format_memory(r) -> str:
+    """Format a single memory search result as a string."""
+    val = r.value
+    if isinstance(val, dict):
+        content = val.get("content", json.dumps(val))
+    else:
+        content = str(val)
+    return f"- {content}"
 
-    Returns a formatted string of relevant memories, or None if nothing found.
+
+async def retrieve_relevant_memories(user_id: str, query: str) -> str | None:
+    """Auto-retrieve relevant memories from all three tiers for system prompt injection.
+
+    Searches core (operational), team (VirtualDojo), and user (personal) namespaces.
+    Returns a formatted string with labeled sections, or None if nothing found.
     """
     try:
         store = get_memory_store()
-        results = store.search(
-            ("memories", user_id),
-            query=query,
-            limit=5,
-        )
-        if not results:
+
+        core_results = store.search(CORE_NAMESPACE, query=query, limit=3)
+        team_results = store.search(TEAM_NAMESPACE, query=query, limit=3)
+        user_results = store.search(("memories", user_id), query=query, limit=3)
+
+        sections = []
+
+        if core_results:
+            lines = [_format_memory(r) for r in core_results]
+            sections.append("Operational knowledge:\n" + "\n".join(lines))
+
+        if team_results:
+            lines = [_format_memory(r) for r in team_results]
+            sections.append("Team knowledge:\n" + "\n".join(lines))
+
+        if user_results:
+            lines = [_format_memory(r) for r in user_results]
+            sections.append("Personal context:\n" + "\n".join(lines))
+
+        if not sections:
             return None
-        lines = []
-        for r in results:
-            val = r.value
-            if isinstance(val, dict):
-                content = val.get("content", json.dumps(val))
-            else:
-                content = str(val)
-            lines.append(f"- {content}")
-        return (
-            "Relevant context from past conversations:\n"
-            + "\n".join(lines)
-        )
+
+        return "Relevant context from memory:\n\n" + "\n\n".join(sections)
     except Exception as e:
         logger.debug("Memory retrieval failed: %s", e)
         return None

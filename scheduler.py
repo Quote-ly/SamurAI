@@ -3,7 +3,7 @@
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -89,6 +89,56 @@ def _register_job(task: dict) -> None:
     logger.info("Registered job %s for task %s", job_id, task["id"])
 
 
+def _reschedule_one_shot(task_id: str, run_date: datetime) -> None:
+    """Re-register a one-shot task with a new DateTrigger for retry."""
+    if not _scheduler:
+        return
+    job_id = f"task_{task_id}"
+    _scheduler.add_job(
+        _execute_task,
+        trigger=DateTrigger(run_date=run_date),
+        id=job_id,
+        args=[task_id],
+        replace_existing=True,
+    )
+    logger.info("Rescheduled job %s for %s", job_id, run_date.isoformat())
+
+
+async def _resolve_conversation_ref(store, task: dict) -> str | None:
+    """Look up a conversation ref, following the bg_task_ parent chain if needed.
+
+    When a background task spawns sub-tasks, those sub-tasks get a synthetic
+    ``bg_task_<parent_id>`` conversation ID that has no saved ref.  This helper
+    walks the parent chain until it finds a real (non-synthetic) ref, then
+    caches the result so future lookups succeed directly.
+    """
+    ref_json = await store.get_conversation_ref(task["conversation_id"])
+    if ref_json:
+        return ref_json
+
+    # Follow bg_task_ → parent task → parent's conversation_id chain
+    conv_id = task["conversation_id"]
+    visited: set[str] = set()
+    while conv_id.startswith("bg_task_") and conv_id not in visited:
+        visited.add(conv_id)
+        parent_task_id = conv_id.removeprefix("bg_task_")
+        parent_task = await store.get_task(parent_task_id)
+        if not parent_task:
+            break
+        ref_json = await store.get_conversation_ref(parent_task["conversation_id"])
+        if ref_json:
+            # Cache so future lookups succeed directly
+            await store.save_conversation_ref(
+                conversation_id=task["conversation_id"],
+                user_id=task["user_id"],
+                ref_json=ref_json,
+            )
+            return ref_json
+        conv_id = parent_task["conversation_id"]
+
+    return None
+
+
 async def _execute_task(task_id: str) -> None:
     """Execute a background task: run the agent, send results to Teams."""
     from task_store import get_task_store
@@ -110,6 +160,16 @@ async def _execute_task(task_id: str) -> None:
         # Use a dedicated thread_id so background history stays separate
         bg_conversation_id = f"bg_task_{task_id}"
 
+        # Propagate the original conversation ref to the bg conversation ID
+        # so any sub-tasks created during execution can deliver results
+        ref_json = await _resolve_conversation_ref(store, task)
+        if ref_json:
+            await store.save_conversation_ref(
+                conversation_id=bg_conversation_id,
+                user_id=task["user_id"],
+                ref_json=ref_json,
+            )
+
         response = await run_agent(
             user_message=task["prompt"],
             conversation_id=bg_conversation_id,
@@ -117,6 +177,8 @@ async def _execute_task(task_id: str) -> None:
             user_name=task["user_name"],
             user_timezone=task["user_timezone"],
             user_email=task["user_email"],
+            recursion_limit=50,
+            is_background_task=True,
         )
 
         await _send_task_result(task, response)
@@ -133,6 +195,20 @@ async def _execute_task(task_id: str) -> None:
             await _send_failure_notification(task, str(e))
             # Remove from scheduler since it's auto-paused
             await pause_task(task_id)
+        elif (
+            updated
+            and task["task_type"] == "one_shot"
+            and updated["status"] == "active"
+        ):
+            # One-shot tasks lose their DateTrigger after firing once.
+            # Reschedule with a 60-second delay so the retry has a chance.
+            retry_at = datetime.now(timezone.utc) + timedelta(seconds=60)
+            logger.info(
+                "Rescheduling one-shot task %s for retry at %s",
+                task_id,
+                retry_at.isoformat(),
+            )
+            _reschedule_one_shot(task_id, retry_at)
     finally:
         await store.unlock(task_id)
 
@@ -142,7 +218,7 @@ async def _send_task_result(task: dict, response: str) -> None:
     from task_store import get_task_store
 
     store = await get_task_store()
-    ref_json = await store.get_conversation_ref(task["conversation_id"])
+    ref_json = await _resolve_conversation_ref(store, task)
     if not ref_json:
         logger.error(
             "No conversation ref for task %s, conv %s",
@@ -172,7 +248,7 @@ async def _send_failure_notification(task: dict, error: str) -> None:
     from task_store import get_task_store
 
     store = await get_task_store()
-    ref_json = await store.get_conversation_ref(task["conversation_id"])
+    ref_json = await _resolve_conversation_ref(store, task)
     if not ref_json:
         return
 

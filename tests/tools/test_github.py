@@ -161,3 +161,90 @@ def test_list_commits_custom_branch(mock_gh):
 
     github_list_recent_commits.invoke({"repo": "org/repo", "branch": "develop"})
     mock_gh.return_value.get_repo.return_value.get_commits.assert_called_with(sha="develop")
+
+
+# --- github_get_commit_diff ---
+
+
+def _make_commit_detail(sha, message, author_name, files):
+    c = MagicMock()
+    c.sha = sha
+    c.commit.message = message
+    c.commit.author.name = author_name
+    c.commit.author.date.isoformat.return_value = "2026-04-10T18:00:00"
+    c.stats.additions = sum(f["additions"] for f in files)
+    c.stats.deletions = sum(f["deletions"] for f in files)
+    mock_files = []
+    for f in files:
+        mf = MagicMock()
+        mf.filename = f["filename"]
+        mf.status = f.get("status", "modified")
+        mf.additions = f["additions"]
+        mf.deletions = f["deletions"]
+        mf.patch = f.get("patch", "")
+        mock_files.append(mf)
+    c.files = mock_files
+    return c
+
+
+@patch("tools.github._github")
+def test_commit_diff_format(mock_gh):
+    from tools.github import github_get_commit_diff
+
+    commit = _make_commit_detail(
+        "abc1234567890",
+        "Fix login bug",
+        "alice",
+        [
+            {"filename": "auth.py", "additions": 5, "deletions": 2, "patch": "+new line\n-old line"},
+            {"filename": "tests/test_auth.py", "additions": 10, "deletions": 0, "patch": "+test code"},
+        ],
+    )
+    mock_gh.return_value.get_repo.return_value.get_commit.return_value = commit
+
+    result = github_get_commit_diff.invoke({"repo": "org/repo", "sha": "abc1234"})
+
+    assert "abc1234" in result
+    assert "Fix login bug" in result
+    assert "alice" in result
+    assert "auth.py" in result
+    assert "tests/test_auth.py" in result
+    assert "+new line" in result
+    assert "Files changed: 2" in result
+    assert "+15 -2" in result
+
+
+@patch("tools.github._github")
+def test_commit_diff_truncates_large_patch(mock_gh):
+    from tools.github import github_get_commit_diff
+
+    commit = _make_commit_detail(
+        "def4567890123",
+        "Big refactor",
+        "bob",
+        [{"filename": "big.py", "additions": 500, "deletions": 300, "patch": "x" * 3000}],
+    )
+    mock_gh.return_value.get_repo.return_value.get_commit.return_value = commit
+
+    result = github_get_commit_diff.invoke({"repo": "org/repo", "sha": "def4567"})
+
+    assert "truncated" in result
+    assert "big.py" in result
+
+
+@patch("tools.github._github")
+def test_commit_diff_no_patch(mock_gh):
+    from tools.github import github_get_commit_diff
+
+    commit = _make_commit_detail(
+        "aaa1111222233",
+        "Binary file update",
+        "carol",
+        [{"filename": "image.png", "additions": 0, "deletions": 0, "status": "modified", "patch": None}],
+    )
+    mock_gh.return_value.get_repo.return_value.get_commit.return_value = commit
+
+    result = github_get_commit_diff.invoke({"repo": "org/repo", "sha": "aaa1111"})
+
+    assert "image.png" in result
+    assert "```diff" not in result  # No patch block for None patch

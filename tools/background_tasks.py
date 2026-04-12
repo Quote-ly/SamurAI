@@ -58,6 +58,8 @@ async def create_background_task(
     from scheduler import schedule_task
 
     store = await get_task_store()
+    # One-shot tasks get 1 retry (2 total attempts); recurring tasks get 3
+    max_failures = 2 if task_type == "one_shot" else 3
     task = await store.create_task(
         user_id=ctx.get("user_id", "unknown"),
         user_name=ctx.get("user_name", ""),
@@ -68,6 +70,7 @@ async def create_background_task(
         prompt=prompt,
         cron_expression=cron_expression or None,
         run_at=run_at or None,
+        max_failures=max_failures,
     )
 
     await schedule_task(task)

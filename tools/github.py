@@ -118,6 +118,39 @@ def github_list_recent_commits(
 
 
 @tool
+def github_get_commit_diff(repo: str, sha: str) -> str:
+    """Get the diff (changed files and patches) for a specific commit.
+
+    Useful for understanding what changed in a commit without syncing the full repo.
+
+    Args:
+        repo: Repository in 'owner/repo' format.
+        sha: Full or short commit SHA.
+    """
+    commit = _github().get_repo(repo).get_commit(sha)
+    lines = [
+        f"**{commit.sha[:7]}** {commit.commit.message.splitlines()[0]}",
+        f"Author: {commit.commit.author.name}",
+        f"Date: {commit.commit.author.date.isoformat()}",
+        f"Files changed: {len(commit.files)}  (+{commit.stats.additions} -{commit.stats.deletions})",
+        "",
+    ]
+    for f in commit.files:
+        lines.append(f"### {f.filename} ({f.status}, +{f.additions} -{f.deletions})")
+        if f.patch:
+            # Truncate large patches to avoid blowing up context
+            patch = f.patch if len(f.patch) <= 2000 else f.patch[:2000] + "\n... (truncated)"
+            lines.append(f"```diff\n{patch}\n```")
+        lines.append("")
+
+    result = "\n".join(lines)
+    # Hard cap to avoid overwhelming the LLM
+    if len(result) > 15000:
+        result = result[:15000] + "\n\n... (output truncated, too many changes)"
+    return result
+
+
+@tool
 def github_list_issues(repo: str, state: str = "open", count: int = 10) -> str:
     """List issues for a GitHub repository.
 

@@ -20,6 +20,8 @@ def mock_llm():
         patch("memory.create_memory_tools", return_value=[]),
         patch("memory.get_memory_store", return_value=MagicMock()),
         patch("memory.get_background_extractor", return_value=MagicMock()),
+        patch("memory.get_core_extractor", return_value=MagicMock()),
+        patch("memory.get_team_extractor", return_value=MagicMock()),
         patch("memory.persist_memories"),
     ):
         mock_instance = MagicMock()
@@ -43,7 +45,7 @@ def mock_llm():
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
     assert len(agent.STATIC_TOOLS) == len(agent.ALL_TOOLS)
-    assert len(agent.ALL_TOOLS) == 71  # Static tools (memory tools added per-user separately)
+    assert len(agent.ALL_TOOLS) == 73  # Static tools (memory tools added per-user separately)
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names

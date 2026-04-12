@@ -15,15 +15,18 @@ from memory import (
     create_memory_tools,
     retrieve_relevant_memories,
     get_background_extractor,
+    get_core_extractor,
+    get_team_extractor,
     persist_memories,
 )
 from tools.gcp_logging import query_cloud_logs
-from tools.gcp_monitoring import check_gcp_metrics
+from tools.gcp_monitoring import check_gcp_metrics, gcp_billing_summary
 from tools.gcp_cloudrun import list_cloud_run_services
 from tools.github import (
     github_list_prs,
     github_get_pr_details,
     github_list_recent_commits,
+    github_get_commit_diff,
     github_list_issues,
     github_get_issue_details,
     github_create_issue,
@@ -54,6 +57,7 @@ TOOL_GROUPS = {
             query_cloud_logs,
             list_cloud_run_services,
             check_gcp_metrics,
+            gcp_billing_summary,
             google_search,
         ] + BACKGROUND_TASK_TOOLS + FILE_HANDLER_TOOLS,
         "keywords": [],  # Always loaded
@@ -63,6 +67,7 @@ TOOL_GROUPS = {
             github_list_prs,
             github_get_pr_details,
             github_list_recent_commits,
+            github_get_commit_diff,
             github_list_issues,
             github_get_issue_details,
             github_create_issue,
@@ -205,6 +210,36 @@ SYSTEM_PROMPT = (
     "github_list_issues to check for duplicates or similar issues. Do NOT create redundant issues.\n"
     "You can close issues with github_close_issue, but ONLY for cleaning up duplicates or "
     "issues created in error. Always include a reason when closing.\n\n"
+    "Autofix Label (quotely-data-service only):\n"
+    "The 'autofix' label triggers an automated Claude-based TDD bug fix attempt. "
+    "When you encounter or create a bug, you may SUGGEST applying the 'autofix' label, "
+    "but NEVER apply it without explicit user approval.\n"
+    "GOOD candidates for autofix:\n"
+    "- Backend data/logic bugs with a clear error trace (NOT NULL violations, type mismatches, "
+    "missing defaults, query filter bugs, wrong field references)\n"
+    "- API endpoint bugs where the error and expected behavior are unambiguous\n"
+    "- Regex/pattern matching fixes (error sanitization, input parsing)\n"
+    "- Missing or incorrect DB column defaults, constraints, or migrations\n"
+    "- Off-by-one errors, wrong status codes, missing null checks\n"
+    "- Test gaps where the fix is adding coverage for an existing behavior\n"
+    "BAD candidates for autofix:\n"
+    "- Frontend/UI bugs (Vue components, CSS, layout) — requires visual verification\n"
+    "- Multi-tenant authorization or access control changes — too security-sensitive\n"
+    "- Alembic migrations on production data — need manual review and rollback planning\n"
+    "- Business logic changes that require product/UX decisions\n"
+    "- Performance issues — profiling needed, not just code changes\n"
+    "- Anything touching payment, compliance, or PII handling\n"
+    "When suggesting autofix, briefly explain WHY it's a good candidate "
+    "(e.g., 'clear error trace, deterministic fix, unit-testable').\n\n"
+    "CHECKING AUTOFIX STATUS:\n"
+    "When the user asks whether an autofix succeeded on an issue:\n"
+    "1. Look for a PR linked to the issue by searching PRs with github_list_prs "
+    "for branches matching 'bugfix/issue-{number}' on Quote-ly/quotely-data-service.\n"
+    "2. If a PR exists: report its title, status (open/merged/closed), and CI check results.\n"
+    "3. If no PR exists: the autofix either hasn't started, is still running, or failed before "
+    "creating a branch. Check the issue comments for any bot activity or error reports.\n"
+    "4. Keep the answer concise: 'PR #X is open and passing CI' or 'No PR found — autofix "
+    "may not have run yet.'\n\n"
     "VirtualDojo CRM:\n"
     "You can query CRM data (contacts, accounts, opportunities, quotes, compliance records) "
     "using the virtualdojo_crm tool. Use virtualdojo_list_tools to discover available operations. "
@@ -255,13 +290,19 @@ SYSTEM_PROMPT = (
     "- NEVER use generic SaaS speak or forced enthusiasm\n"
     "- NEVER use em dashes (—) in social media posts. Use periods, commas, or line breaks instead.\n\n"
     "Long-term Memory:\n"
-    "You have a persistent memory system powered by LangMem.\n"
-    "- Use manage_memory to save, update, or delete facts and preferences.\n"
-    "- Use search_memory to find relevant past context.\n"
+    "You have a three-tier persistent memory system:\n"
+    "1. **Core memory** (manage_core_memory / search_core_memory): Operational knowledge about how you work — "
+    "tool patterns, troubleshooting recipes, workflow tips. Shared with ALL users.\n"
+    "2. **Team memory** (manage_team_memory / search_team_memory): VirtualDojo-specific knowledge — "
+    "project decisions, infrastructure facts, internal processes. Team-members only.\n"
+    "3. **Personal memory** (manage_memory / search_memory): Individual user preferences and context.\n\n"
+    "MEMORY GUIDELINES:\n"
+    "- After successfully resolving a complex issue, save the pattern to core memory.\n"
+    "- When you learn a project fact or team decision, save it to team memory.\n"
+    "- User preferences and personal context go to personal memory.\n"
     "- Memories are also automatically extracted from conversations in the background.\n"
-    "- Save memories proactively when users share important context.\n"
     "- Update existing memories when information changes rather than creating duplicates.\n"
-    "- Do NOT save trivial or transient information (e.g., 'user asked about logs').\n\n"
+    "- Do NOT save trivial or transient information.\n\n"
     "GitHub Projects:\n"
     "You can manage GitHub Projects V2 in the Quote-ly organization.\n"
     "- github_list_projects: List all projects\n"
@@ -573,6 +614,8 @@ async def run_agent(
     user_timezone: str = "",
     user_email: str = "",
     status_callback=None,
+    recursion_limit: int = 50,
+    is_background_task: bool = False,
 ) -> str:
     start = time.time()
 
@@ -597,8 +640,16 @@ async def run_agent(
             context_parts.append(f"Timezone: {user_timezone}")
 
     message = user_message
+    if is_background_task:
+        message = (
+            "[BACKGROUND TASK — This is an autonomous scheduled task, not a live "
+            "user message. Execute the instruction below directly and return the "
+            "result. Do NOT ask clarifying questions, suggest creating tasks, or "
+            "check for duplicate tasks. Just do the work and report your findings.]\n"
+            + message
+        )
     if context_parts:
-        message = f"[{' | '.join(context_parts)}]\n{user_message}"
+        message = f"[{' | '.join(context_parts)}]\n{message}"
 
     # Fast acknowledgment via lightweight model (no tools, ~0.5s)
     if status_callback:
@@ -622,7 +673,10 @@ async def run_agent(
             pass  # Don't block the main agent if ack fails
 
     graph = await _get_graph(user_id)
-    config = {"configurable": {"thread_id": conversation_id, "user_id": user_id}}
+    config = {
+        "configurable": {"thread_id": conversation_id, "user_id": user_id},
+        "recursion_limit": recursion_limit,
+    }
 
     # Friendly tool names for status updates
     _tool_labels = {
@@ -633,9 +687,11 @@ async def run_agent(
         "query_cloud_logs": "Querying Cloud Logging",
         "list_cloud_run_services": "Checking Cloud Run services",
         "check_gcp_metrics": "Checking metrics",
+        "gcp_billing_summary": "Checking billing costs",
         "github_list_prs": "Checking pull requests",
         "github_get_pr_details": "Reading PR details",
         "github_list_recent_commits": "Checking recent commits",
+        "github_get_commit_diff": "Reading commit diff",
         "github_list_issues": "Checking GitHub issues",
         "github_get_issue_details": "Reading issue details",
         "github_create_issue": "Creating GitHub issue",
@@ -654,6 +710,10 @@ async def run_agent(
         "create_background_task": "Creating background task",
         "manage_memory": "Saving to memory",
         "search_memory": "Searching memory",
+        "manage_core_memory": "Saving operational knowledge",
+        "search_core_memory": "Searching operational knowledge",
+        "manage_team_memory": "Saving team knowledge",
+        "search_team_memory": "Searching team knowledge",
         "get_uploaded_file_content": "Reading uploaded file",
         "get_spreadsheet_info": "Analyzing spreadsheet structure",
         "read_spreadsheet_cells": "Verifying spreadsheet changes",
@@ -709,6 +769,7 @@ async def run_agent(
     final_messages = []
     _sent_statuses: set[str] = set()  # Track sent labels to avoid duplicates
     _sent_midstream_summary = False
+    _tool_call_log: list[str] = []  # Track tool calls for memory extraction
 
     async for event in graph.astream(
         {"messages": [HumanMessage(content=message)]},
@@ -719,25 +780,36 @@ async def run_agent(
         if "agent" in event:
             final_messages = event["agent"].get("messages", [])
             # Send status updates for tool calls (ack already sent above)
-            if status_callback and final_messages:
+            if final_messages:
                 last_msg = final_messages[-1]
                 if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                     tool_names = [tc.get("name", "") for tc in last_msg.tool_calls]
-                    new_labels = []
-                    for n in tool_names:
-                        label = _tool_labels.get(n, n)
-                        if label not in _sent_statuses:
-                            _sent_statuses.add(label)
-                            new_labels.append(label)
-                    if new_labels:
-                        status = "_" + ", ".join(new_labels) + "..._"
-                        try:
-                            await status_callback(status)
-                        except Exception:
-                            pass
+                    print(f"[agent] tool_calls: {tool_names} conv={conversation_id}", flush=True)
+                    if status_callback:
+                        new_labels = []
+                        for n in tool_names:
+                            label = _tool_labels.get(n, n)
+                            if label not in _sent_statuses:
+                                _sent_statuses.add(label)
+                                new_labels.append(label)
+                        if new_labels:
+                            status = "_" + ", ".join(new_labels) + "..._"
+                            try:
+                                await status_callback(status)
+                            except Exception:
+                                pass
 
         elif "tools" in event:
             final_messages = event["tools"].get("messages", [])
+
+            # Log tool results and track for memory extraction
+            from langchain_core.messages import ToolMessage
+            for msg in final_messages:
+                if isinstance(msg, ToolMessage):
+                    content_preview = str(msg.content)[:200]
+                    status = "error" if msg.status == "error" else "ok"
+                    print(f"[agent] tool_result: {msg.name} ({status}) conv={conversation_id} -> {content_preview}", flush=True)
+                    _tool_call_log.append(f"{msg.name}: {status} -> {str(msg.content)[:150]}")
 
             # Mid-stream summary: when we hit the soft limit, notify user but keep going
             if status_callback and not _sent_midstream_summary:
@@ -774,15 +846,29 @@ async def run_agent(
 
     # Background memory extraction — auto-saves facts from conversation
     try:
+        # Enrich response with tool call summary for better extraction
+        extraction_content = response_text
+        if _tool_call_log:
+            tools_used = "\n".join(_tool_call_log[:10])
+            extraction_content += f"\n\n[Tools used in this interaction:\n{tools_used}]"
+
+        msg_payload = {"messages": [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": extraction_content},
+        ]}
+        user_config = {"configurable": {"user_id": user_id}}
+
+        # User-level extraction (personal preferences)
         executor = get_background_extractor()
-        executor.submit(
-            {"messages": [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": response_text},
-            ]},
-            config={"configurable": {"user_id": user_id}},
-            after_seconds=1.0,
-        )
+        executor.submit(msg_payload, config=user_config, after_seconds=1.0)
+
+        # Core operational knowledge extraction (shared with all users)
+        core_executor = get_core_extractor()
+        core_executor.submit(msg_payload, config=user_config, after_seconds=2.0)
+
+        # Team knowledge extraction (VirtualDojo internal)
+        team_executor = get_team_extractor()
+        team_executor.submit(msg_payload, config=user_config, after_seconds=3.0)
     except Exception as e:
         logger.debug("Background memory extraction failed: %s", e)
 

@@ -125,3 +125,56 @@ def test_filter_string_construction(mock_client_cls, mock_interval, mock_req):
     filter_str = call_kwargs.kwargs.get("filter") or call_kwargs[1].get("filter")
     assert 'metric.type="run.googleapis.com/request_count"' in filter_str
     assert 'resource.type="cloud_run_revision"' in filter_str
+
+
+# --- gcp_billing_summary ---
+
+
+def _make_billing_row(service, total_cost, credits, net_cost):
+    row = MagicMock()
+    row.service = service
+    row.total_cost = total_cost
+    row.credits = credits
+    row.net_cost = net_cost
+    return row
+
+
+@patch("google.cloud.bigquery.Client")
+def test_billing_summary_formats_output(mock_bq_cls):
+    from tools.gcp_monitoring import gcp_billing_summary
+
+    rows = [
+        _make_billing_row("Cloud Run", 45.50, -5.00, 40.50),
+        _make_billing_row("Cloud Storage", 12.30, 0.00, 12.30),
+    ]
+    mock_bq_cls.return_value.query.return_value.result.return_value = rows
+
+    result = gcp_billing_summary.invoke({"days": 30})
+
+    assert "Cloud Run" in result
+    assert "$40.50" in result
+    assert "Cloud Storage" in result
+    assert "$12.30" in result
+    assert "Total: $52.80" in result
+
+
+@patch("google.cloud.bigquery.Client")
+def test_billing_summary_no_data(mock_bq_cls):
+    from tools.gcp_monitoring import gcp_billing_summary
+
+    mock_bq_cls.return_value.query.return_value.result.return_value = []
+
+    result = gcp_billing_summary.invoke({"days": 7})
+
+    assert "No billing data found" in result
+
+
+@patch("google.cloud.bigquery.Client")
+def test_billing_summary_table_not_found(mock_bq_cls):
+    from tools.gcp_monitoring import gcp_billing_summary
+
+    mock_bq_cls.return_value.query.return_value.result.side_effect = Exception("Not found: Table")
+
+    result = gcp_billing_summary.invoke({"days": 30})
+
+    assert "Billing export table not found" in result

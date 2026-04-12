@@ -25,6 +25,7 @@ google-cloud-alloydb>=0.1
 google-cloud-artifact-registry>=1.0
 google-cloud-containeranalysis>=2.0
 google-cloud-storage>=2.0
+google-cloud-bigquery>=3.0
 fpdf2>=2.7
 google-cloud-alloydb-connector[pg8000]>=1.0
 sqlalchemy>=2.0

@@ -101,6 +101,7 @@ class TaskStore:
         prompt: str,
         cron_expression: str | None = None,
         run_at: str | None = None,
+        max_failures: int = 3,
     ) -> dict:
         """Insert a new task. Returns the full task dict."""
         task_id = str(uuid.uuid4())[:8]
@@ -123,7 +124,7 @@ class TaskStore:
             "run_count": 0,
             "error_count": 0,
             "last_error": None,
-            "max_failures": 3,
+            "max_failures": max_failures,
         }
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
@@ -147,7 +148,7 @@ class TaskStore:
                     now,
                     0,
                     0,
-                    3,
+                    max_failures,
                 ),
             )
             await db.commit()

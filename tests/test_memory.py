@@ -17,11 +17,15 @@ def _reset_singletons():
     memory._checkpointer = None
     memory._checkpoint_conn = None
     memory._background_executor = None
+    memory._core_executor = None
+    memory._team_executor = None
     yield
     memory._store = None
     memory._checkpointer = None
     memory._checkpoint_conn = None
     memory._background_executor = None
+    memory._core_executor = None
+    memory._team_executor = None
 
 
 # --- InMemoryStore ---
@@ -155,16 +159,23 @@ async def test_get_checkpointer_falls_back_to_memory_saver():
 # --- LangMem Memory Tools ---
 
 
-def test_create_memory_tools_returns_two_tools():
+def test_create_memory_tools_returns_six_tools():
     from memory import create_memory_tools
 
     with patch("memory.get_memory_store", return_value=MagicMock()):
         tools = create_memory_tools("test-user")
 
-    assert len(tools) == 2
+    assert len(tools) == 6
     names = {t.name for t in tools}
+    # User tier
     assert "manage_memory" in names
     assert "search_memory" in names
+    # Core tier
+    assert "manage_core_memory" in names
+    assert "search_core_memory" in names
+    # Team tier
+    assert "manage_team_memory" in names
+    assert "search_team_memory" in names
 
 
 # --- Auto-Retrieval ---
@@ -172,17 +183,34 @@ def test_create_memory_tools_returns_two_tools():
 
 @pytest.mark.asyncio
 async def test_retrieve_relevant_memories_with_results():
-    from memory import retrieve_relevant_memories
+    from memory import retrieve_relevant_memories, CORE_NAMESPACE, TEAM_NAMESPACE
 
     mock_store = MagicMock()
-    mock_result = MagicMock()
-    mock_result.value = {"content": "Devin prefers short responses"}
-    mock_store.search.return_value = [mock_result]
+    core_result = MagicMock()
+    core_result.value = {"content": "Check PRs for bugfix/issue-N branches"}
+    team_result = MagicMock()
+    team_result.value = {"content": "quotely-data-service uses autofix label"}
+    user_result = MagicMock()
+    user_result.value = {"content": "Devin prefers short responses"}
+
+    def _search(namespace, query, limit=3):
+        if namespace == CORE_NAMESPACE:
+            return [core_result]
+        if namespace == TEAM_NAMESPACE:
+            return [team_result]
+        return [user_result]
+
+    mock_store.search.side_effect = _search
 
     with patch("memory.get_memory_store", return_value=mock_store):
-        result = await retrieve_relevant_memories("user1", "what does Devin prefer?")
+        result = await retrieve_relevant_memories("user1", "autofix status")
 
     assert result is not None
+    assert "Operational knowledge:" in result
+    assert "bugfix/issue-N" in result
+    assert "Team knowledge:" in result
+    assert "autofix label" in result
+    assert "Personal context:" in result
     assert "Devin prefers short responses" in result
 
 
@@ -197,6 +225,31 @@ async def test_retrieve_relevant_memories_empty():
         result = await retrieve_relevant_memories("user1", "anything")
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_retrieve_relevant_memories_partial_tiers():
+    """Only tiers with results should appear in the output."""
+    from memory import retrieve_relevant_memories, CORE_NAMESPACE, TEAM_NAMESPACE
+
+    mock_store = MagicMock()
+    core_result = MagicMock()
+    core_result.value = {"content": "Use gcloud logging read for Cloud Run errors"}
+
+    def _search(namespace, query, limit=3):
+        if namespace == CORE_NAMESPACE:
+            return [core_result]
+        return []
+
+    mock_store.search.side_effect = _search
+
+    with patch("memory.get_memory_store", return_value=mock_store):
+        result = await retrieve_relevant_memories("user1", "cloud run errors")
+
+    assert result is not None
+    assert "Operational knowledge:" in result
+    assert "Team knowledge:" not in result
+    assert "Personal context:" not in result
 
 
 @pytest.mark.asyncio
@@ -237,5 +290,69 @@ def test_get_background_extractor_is_singleton():
         mock_executor_cls.return_value = MagicMock()
         e1 = get_background_extractor()
         e2 = get_background_extractor()
+
+    assert e1 is e2
+
+
+# --- Core Extractor ---
+
+
+def test_get_core_extractor_returns_executor():
+    from memory import get_core_extractor
+
+    with (
+        patch("memory.get_memory_store", return_value=MagicMock()),
+        patch("langmem.create_memory_store_manager", return_value=MagicMock()),
+        patch("langmem.ReflectionExecutor") as mock_executor_cls,
+    ):
+        mock_executor_cls.return_value = MagicMock()
+        executor = get_core_extractor()
+
+    assert executor is not None
+
+
+def test_get_core_extractor_is_singleton():
+    from memory import get_core_extractor
+
+    with (
+        patch("memory.get_memory_store", return_value=MagicMock()),
+        patch("langmem.create_memory_store_manager", return_value=MagicMock()),
+        patch("langmem.ReflectionExecutor") as mock_executor_cls,
+    ):
+        mock_executor_cls.return_value = MagicMock()
+        e1 = get_core_extractor()
+        e2 = get_core_extractor()
+
+    assert e1 is e2
+
+
+# --- Team Extractor ---
+
+
+def test_get_team_extractor_returns_executor():
+    from memory import get_team_extractor
+
+    with (
+        patch("memory.get_memory_store", return_value=MagicMock()),
+        patch("langmem.create_memory_store_manager", return_value=MagicMock()),
+        patch("langmem.ReflectionExecutor") as mock_executor_cls,
+    ):
+        mock_executor_cls.return_value = MagicMock()
+        executor = get_team_extractor()
+
+    assert executor is not None
+
+
+def test_get_team_extractor_is_singleton():
+    from memory import get_team_extractor
+
+    with (
+        patch("memory.get_memory_store", return_value=MagicMock()),
+        patch("langmem.create_memory_store_manager", return_value=MagicMock()),
+        patch("langmem.ReflectionExecutor") as mock_executor_cls,
+    ):
+        mock_executor_cls.return_value = MagicMock()
+        e1 = get_team_extractor()
+        e2 = get_team_extractor()
 
     assert e1 is e2

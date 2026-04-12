@@ -219,11 +219,13 @@ async def test_on_message_handles_card_action(patched_app):
     ctx = MagicMock()
     ctx.activity.text = None
     ctx.activity.value = {"action": "social_approve", "conversation_id": "conv-1"}
+    # activity.name must be None/falsy so on_message doesn't fall through
+    ctx.activity.name = None
     ctx.send_activity = AsyncMock()
 
-    with patch.object(
-        patched_app,
-        "handle_card_action",
+    # Patch the imported reference that on_message actually calls
+    with patch(
+        "app.handle_card_action",
         new_callable=AsyncMock,
     ) as mock_handler:
         await patched_app.on_message(ctx)
