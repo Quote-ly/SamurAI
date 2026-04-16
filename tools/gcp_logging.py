@@ -18,7 +18,7 @@ def query_cloud_logs(filter_query: str, project_id: str | None = None) -> str:
 
     pid = project_id or os.environ["GCP_PROJECT_ID"]
     client = cloud_logging.Client(project=pid)
-    entries = list(client.list_entries(filter_=filter_query, max_results=20))
+    entries = list(client.list_entries(filter_=filter_query, max_results=50))
 
     if not entries:
         return "No log entries found for that filter."

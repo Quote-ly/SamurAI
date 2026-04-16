@@ -59,8 +59,29 @@ TOOL_GROUPS = {
             check_gcp_metrics,
             gcp_billing_summary,
             google_search,
-        ] + BACKGROUND_TASK_TOOLS + FILE_HANDLER_TOOLS,
+        ],
         "keywords": [],  # Always loaded
+    },
+    "background_tasks": {
+        "tools": BACKGROUND_TASK_TOOLS,
+        "keywords": [
+            "background task", "schedule", "recurring", "cron", "remind",
+            "follow up", "check back", "one shot", "task", "autonomous",
+        ],
+    },
+    "files": {
+        "tools": FILE_HANDLER_TOOLS,
+        "keywords": [
+            "file", "spreadsheet", "excel", "csv", "upload", "column",
+            "fill", "edit cell", "document", "worksheet",
+        ],
+    },
+    "memory": {
+        "tools": [],  # Memory tools are user-specific, added in _select_tool_groups
+        "keywords": [
+            "remember", "recall", "save this", "memory", "what did",
+            "you know", "forget", "preferences", "last time",
+        ],
     },
     "github": {
         "tools": [
@@ -144,8 +165,14 @@ for group in TOOL_GROUPS.values():
 STATIC_TOOLS = ALL_TOOLS
 
 
-def _select_tool_groups(message: str) -> list:
-    """Select which tool groups to activate based on the user's message."""
+def _select_tool_groups(message: str, memory_tools: list | None = None) -> list:
+    """Select which tool groups to activate based on the user's message.
+
+    Args:
+        message: The user's message text.
+        memory_tools: User-specific memory tools to include when the "memory"
+            group is activated.
+    """
     msg_lower = message.lower()
     selected = list(TOOL_GROUPS["core"]["tools"])  # Always include core
 
@@ -153,12 +180,10 @@ def _select_tool_groups(message: str) -> list:
         if name == "core":
             continue
         if any(kw in msg_lower for kw in group["keywords"]):
-            selected.extend(group["tools"])
-
-    # If no specific group matched, include github (most common)
-    non_core_matched = len(selected) > len(TOOL_GROUPS["core"]["tools"])
-    if not non_core_matched:
-        selected.extend(TOOL_GROUPS["github"]["tools"])
+            if name == "memory" and memory_tools:
+                selected.extend(memory_tools)
+            else:
+                selected.extend(group["tools"])
 
     return selected
 
@@ -170,7 +195,14 @@ SYSTEM_PROMPT = (
     "EFFICIENCY:\n"
     "- Call multiple tools in parallel when possible (return multiple tool_calls at once).\n"
     "- Don't make redundant calls — if you already checked something, don't check it again.\n"
-    "- After gathering enough information, synthesize and respond. Don't keep investigating.\n\n"
+    "- After gathering enough information, synthesize and respond. Don't keep investigating.\n"
+    "- STEP BUDGET: Simple queries (logs, status, list services) should use 2-4 tool calls. "
+    "Complex investigations (troubleshooting, root cause) can use up to 10-12. "
+    "If you've made 10+ tool calls, stop and synthesize what you have.\n"
+    "- For GCP queries: call query_cloud_logs once per relevant project and respond. "
+    "Do NOT refine filters or make follow-up queries unless the user asks.\n"
+    "- Do NOT explicitly search or save to memory during routine queries — "
+    "memory retrieval and extraction happen automatically in the background.\n\n"
     "FILE HANDLING:\n"
     "When a user uploads a file and asks you to fill in, edit, or modify it:\n"
     "1. Use get_spreadsheet_info to understand the structure.\n"
@@ -297,10 +329,10 @@ SYSTEM_PROMPT = (
     "project decisions, infrastructure facts, internal processes. Team-members only.\n"
     "3. **Personal memory** (manage_memory / search_memory): Individual user preferences and context.\n\n"
     "MEMORY GUIDELINES:\n"
-    "- After successfully resolving a complex issue, save the pattern to core memory.\n"
-    "- When you learn a project fact or team decision, save it to team memory.\n"
-    "- User preferences and personal context go to personal memory.\n"
-    "- Memories are also automatically extracted from conversations in the background.\n"
+    "- Memories are automatically extracted from conversations in the background — "
+    "you do NOT need to explicitly save memories during routine queries.\n"
+    "- Only use memory tools when the user explicitly asks you to remember or recall something, "
+    "or when you discover a truly novel troubleshooting pattern worth preserving.\n"
     "- Update existing memories when information changes rather than creating duplicates.\n"
     "- Do NOT save trivial or transient information.\n\n"
     "GitHub Projects:\n"
@@ -476,6 +508,13 @@ def _needs_pro_model(messages) -> bool:
 
 SOFT_TOOL_LIMIT = 15  # Send a "still working" notice after this many unique tool calls
 
+# Populated at the end of each run_agent() call so the scheduler can tell whether
+# the agent already delivered content via send_teams_message — in which case the
+# scheduler should suppress the proactive post of the agent's final text to the
+# task creator, which otherwise shows up as a meta "Sent a message to..." echo.
+# Keyed by conversation_id; consumers should .pop() after reading.
+_last_run_metadata: dict[str, dict] = {}
+
 _GCP_KWARGS = dict(
     project=os.environ.get("GCP_PROJECT_ID"),
     location="global",
@@ -498,14 +537,17 @@ async def _build_graph(user_id: str = "default"):
     llm_flash = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", **_GCP_KWARGS)
     llm_pro = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", **_GCP_KWARGS)
 
-    # User-specific tools (always included in every call)
-    user_specific_tools = [
+    # User-specific tools
+    memory_tools = create_memory_tools(user_id)
+    crm_tools = [
         create_virtualdojo_tool(user_id),
         create_virtualdojo_list_tools(user_id),
-    ] + create_memory_tools(user_id)
+    ]
+    # Always-available user tools (CRM). Memory tools are keyword-gated.
+    always_user_tools = crm_tools
 
     # ToolNode needs ALL tools so it can execute whatever the LLM selected
-    all_tools = ALL_TOOLS + user_specific_tools
+    all_tools = ALL_TOOLS + crm_tools + memory_tools
     tool_node = ToolNode(all_tools, handle_tool_errors=True)
 
     async def call_model(state: MessagesState):
@@ -522,7 +564,9 @@ async def _build_graph(user_id: str = "default"):
             (m for m in reversed(messages) if isinstance(m, HumanMessage)), None
         )
         if last_human:
-            selected_tools = _select_tool_groups(last_human.content) + user_specific_tools
+            selected_tools = _select_tool_groups(
+                last_human.content, memory_tools=memory_tools
+            ) + always_user_tools
         else:
             selected_tools = all_tools
 
@@ -770,6 +814,8 @@ async def run_agent(
     _sent_statuses: set[str] = set()  # Track sent labels to avoid duplicates
     _sent_midstream_summary = False
     _tool_call_log: list[str] = []  # Track tool calls for memory extraction
+    _tools_invoked: list[str] = []  # Tool names the agent asked to run this call
+    _teams_recipients: list[str] = []  # Emails send_teams_message targeted
 
     async for event in graph.astream(
         {"messages": [HumanMessage(content=message)]},
@@ -784,6 +830,15 @@ async def run_agent(
                 last_msg = final_messages[-1]
                 if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
                     tool_names = [tc.get("name", "") for tc in last_msg.tool_calls]
+                    _tools_invoked.extend(tool_names)
+                    # Capture send_teams_message recipients so the scheduler
+                    # can skip a redundant proactive post when the content has
+                    # already been delivered to the task creator.
+                    for tc in last_msg.tool_calls:
+                        if tc.get("name") == "send_teams_message":
+                            recipient = (tc.get("args") or {}).get("recipient_email", "")
+                            if recipient:
+                                _teams_recipients.append(recipient.lower())
                     print(f"[agent] tool_calls: {tool_names} conv={conversation_id}", flush=True)
                     if status_callback:
                         new_labels = []
@@ -878,5 +933,13 @@ async def run_agent(
         persist_memories()
     except Exception:
         pass
+
+    # Expose per-run metadata so the scheduler can decide whether to suppress
+    # the proactive post (e.g. the agent already delivered content via Teams).
+    _last_run_metadata[conversation_id] = {
+        "tools_invoked": list(_tools_invoked),
+        "teams_recipients": list(_teams_recipients),
+        "finished_at": time.time(),
+    }
 
     return response_text

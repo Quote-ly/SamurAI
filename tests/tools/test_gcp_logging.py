@@ -70,7 +70,7 @@ def test_filter_query_passed_through(mock_client_cls):
 
     query_cloud_logs.invoke({"filter_query": filter_str})
     mock_client_cls.return_value.list_entries.assert_called_once_with(
-        filter_=filter_str, max_results=20
+        filter_=filter_str, max_results=50
     )
 
 

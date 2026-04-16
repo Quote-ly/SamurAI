@@ -120,17 +120,24 @@ def test_system_prompt_defined(mock_llm):
     assert "FR2615441197" in agent.SYSTEM_PROMPT
     assert "Quote-ly/Fedramp" in agent.SYSTEM_PROMPT
     assert "fedramp_collect_evidence" in agent.SYSTEM_PROMPT or "fedramp_evidence_summary" in agent.SYSTEM_PROMPT
+    # Step budget guidance (prevents recursion limit exhaustion)
+    assert "STEP BUDGET" in agent.SYSTEM_PROMPT
+    assert "2-4 tool calls" in agent.SYSTEM_PROMPT
+    assert "memory retrieval and extraction happen automatically" in agent.SYSTEM_PROMPT
 
 
 def test_select_tool_groups_core_only(mock_llm):
-    """Simple query should get core + github (default fallback)."""
+    """Simple query should get ONLY core tools — no fallback groups."""
     _, agent = mock_llm
     tools = agent._select_tool_groups("check the logs for errors")
     names = {t.name for t in tools}
     assert "query_cloud_logs" in names
     assert "list_cloud_run_services" in names
-    # GitHub loaded as default fallback
-    assert "github_list_issues" in names
+    # No fallback — GitHub should NOT be loaded for simple log queries
+    assert "github_list_issues" not in names
+    # Background tasks and file tools should NOT be loaded
+    assert "create_background_task" not in names
+    assert "get_spreadsheet_info" not in names
     # FedRAMP/OSCAL should NOT be loaded
     assert "fedramp_collect_evidence" not in names
     assert "oscal_generate_ssp" not in names
@@ -192,6 +199,78 @@ def test_select_tool_groups_much_smaller_than_all(mock_llm):
     _, agent = mock_llm
     simple_tools = agent._select_tool_groups("check the logs")
     assert len(simple_tools) < len(agent.ALL_TOOLS) / 2
+
+
+def test_select_tool_groups_background_tasks(mock_llm):
+    """Background task keywords should load task tools."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("create a background task to remind me")
+    names = {t.name for t in tools}
+    assert "create_background_task" in names
+    assert "list_background_tasks" in names
+    assert "pause_background_task" in names
+
+
+def test_select_tool_groups_files(mock_llm):
+    """File keywords should load file handler tools."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("fill the spreadsheet column")
+    names = {t.name for t in tools}
+    assert "get_spreadsheet_info" in names
+    assert "fill_spreadsheet_column" in names
+    assert "edit_spreadsheet" in names
+
+
+def test_select_tool_groups_memory_without_tools(mock_llm):
+    """Memory keywords without memory_tools arg should not crash."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("do you remember my preferences")
+    names = {t.name for t in tools}
+    # Core tools should still be there
+    assert "query_cloud_logs" in names
+
+
+def test_select_tool_groups_memory_with_tools(mock_llm):
+    """Memory keywords with memory_tools should include them."""
+    _, agent = mock_llm
+    mock_mem_tool = MagicMock()
+    mock_mem_tool.name = "manage_memory"
+    tools = agent._select_tool_groups(
+        "do you remember what I told you last time",
+        memory_tools=[mock_mem_tool],
+    )
+    names = {t.name for t in tools}
+    assert "manage_memory" in names
+    assert "query_cloud_logs" in names
+
+
+def test_select_tool_groups_no_memory_for_logs(mock_llm):
+    """GCP log queries should NOT get memory tools even if passed."""
+    _, agent = mock_llm
+    mock_mem_tool = MagicMock()
+    mock_mem_tool.name = "search_memory"
+    tools = agent._select_tool_groups(
+        "check the production logs for errors",
+        memory_tools=[mock_mem_tool],
+    )
+    names = {t.name for t in tools}
+    assert "query_cloud_logs" in names
+    # Memory tools should NOT be included — no memory keywords
+    assert "search_memory" not in names
+
+
+def test_select_tool_groups_github_only_when_keyword_matches(mock_llm):
+    """GitHub tools should only load when github keywords match."""
+    _, agent = mock_llm
+    # No github keywords
+    tools_no_gh = agent._select_tool_groups("check the logs")
+    names_no_gh = {t.name for t in tools_no_gh}
+    assert "github_list_prs" not in names_no_gh
+
+    # With github keywords
+    tools_gh = agent._select_tool_groups("show me the pull requests")
+    names_gh = {t.name for t in tools_gh}
+    assert "github_list_prs" in names_gh
 
 
 def test_needs_pro_model_for_oscal(mock_llm):
