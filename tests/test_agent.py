@@ -221,6 +221,15 @@ def test_select_tool_groups_files(mock_llm):
     assert "edit_spreadsheet" in names
 
 
+def test_select_tool_groups_file_deployed_no_file_tools(mock_llm):
+    """'file deployed' should NOT trigger file handler tools — 'file' is too generic."""
+    _, agent = mock_llm
+    tools = agent._select_tool_groups("was the config file deployed to main")
+    names = {t.name for t in tools}
+    assert "get_spreadsheet_info" not in names
+    assert "fill_spreadsheet_column" not in names
+
+
 def test_select_tool_groups_memory_without_tools(mock_llm):
     """Memory keywords without memory_tools arg should not crash."""
     _, agent = mock_llm

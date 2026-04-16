@@ -152,6 +152,21 @@ If auth has expired: `gcloud auth login`
 - Persistent storage: GCS FUSE bucket `samurai-bot-data` mounted at `/data`
 - Execution environment: gen2, startup CPU boost enabled
 
+### Required secrets and env vars for Bot Framework auth
+
+The bot uses a **SingleTenant** Azure Bot Service registration. All three of these must be set correctly or the bot will silently fail to respond on Teams (`Unauthorized` on all outbound calls):
+
+| Env var | Source | Notes |
+|---------|--------|-------|
+| `MICROSOFT_APP_ID` | GCP Secret Manager (`ms-app-id`) | Azure AD app registration client ID: `35e1851a-0377-47f3-8b47-09110fec743c` |
+| `MICROSOFT_APP_PASSWORD` | GCP Secret Manager (`ms-app-password`) | Azure AD app client secret — must match a valid credential on the app registration |
+| `MICROSOFT_APP_TENANT_ID` | Cloud Run env var (not a secret) | Must be set to `a0a6af2b-e398-4029-94c7-5fbae193405f` — without this, the SDK authenticates against the wrong (multi-tenant) endpoint and all outbound calls fail |
+
+**Troubleshooting "Unauthorized" errors**: If the bot receives messages but can't reply, check these in order:
+1. `MICROSOFT_APP_TENANT_ID` is set on the Cloud Run service (this was missing once and caused a full outage)
+2. The client secret in GCP Secret Manager matches a valid credential on the Azure app registration (`az ad app credential list --id 35e1851a-0377-47f3-8b47-09110fec743c`)
+3. The Azure Bot Service app type (`az bot show --name samurai-dojo-bot --resource-group samurai-rg --query 'properties.msaAppType'`) is `SingleTenant`
+
 ## Running tests
 
 ```bash
@@ -161,7 +176,7 @@ python -m pytest tests/ -v
 ## Known operational notes
 
 - APScheduler runs in-process; jobs are in-memory and rebuilt from SQLite on restart
-- Recursion limit is 50 for both interactive and background tasks
+- Recursion limit is 75 for both interactive and background tasks
 - One-shot tasks get 1 automatic retry on failure (60s delay)
 - Conversation refs are resolved through `bg_task_` parent chains for sub-task delivery
 - Background tasks are tagged with `is_background_task=True` so the agent executes directly without conversational back-and-forth

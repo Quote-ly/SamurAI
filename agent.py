@@ -72,8 +72,8 @@ TOOL_GROUPS = {
     "files": {
         "tools": FILE_HANDLER_TOOLS,
         "keywords": [
-            "file", "spreadsheet", "excel", "csv", "upload", "column",
-            "fill", "edit cell", "document", "worksheet",
+            "spreadsheet", "excel", "csv", "upload", "column",
+            "fill", "edit cell", "worksheet", "uploaded file",
         ],
     },
     "memory": {
@@ -658,7 +658,7 @@ async def run_agent(
     user_timezone: str = "",
     user_email: str = "",
     status_callback=None,
-    recursion_limit: int = 50,
+    recursion_limit: int = 75,
     is_background_task: bool = False,
 ) -> str:
     start = time.time()
