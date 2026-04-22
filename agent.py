@@ -887,10 +887,12 @@ async def run_agent(
             from langchain_core.messages import ToolMessage
             for msg in final_messages:
                 if isinstance(msg, ToolMessage):
-                    content_preview = str(msg.content)[:200]
+                    content_str = str(msg.content) if msg.content is not None else ""
+                    content_preview = content_str[:200]
+                    size = len(content_str)
                     status = "error" if msg.status == "error" else "ok"
-                    print(f"[agent] tool_result: {msg.name} ({status}) conv={conversation_id} -> {content_preview}", flush=True)
-                    _tool_call_log.append(f"{msg.name}: {status} -> {str(msg.content)[:150]}")
+                    print(f"[agent] tool_result: {msg.name} ({status}) size={size} conv={conversation_id} -> {content_preview}", flush=True)
+                    _tool_call_log.append(f"{msg.name}: {status} -> {content_preview[:150]}")
 
             # Mid-stream summary: when we hit the soft limit, notify user but keep going
             if status_callback and not _sent_midstream_summary:

@@ -68,8 +68,8 @@ INVESTIGATOR_SYSTEM_PROMPT = (
 )
 
 
-INVESTIGATOR_RECURSION_LIMIT = 30
-INVESTIGATOR_TIMEOUT_SECONDS = 60
+INVESTIGATOR_RECURSION_LIMIT = 50
+INVESTIGATOR_TIMEOUT_SECONDS = 120
 
 
 _investigator_graph = None
@@ -163,38 +163,90 @@ async def investigate(question: str) -> str:
         string starting with "Investigator failed:" on timeout or failure.
     """
     start = time.time()
+    q_tag = question[:80]
     logger.info("[investigate] q=%r", question[:200])
-    try:
+    print(f"[investigate] start q={q_tag!r}", flush=True)
+
+    tool_count = 0
+    final_text: str | None = None
+
+    async def _run():
+        nonlocal tool_count, final_text
         graph = _get_graph()
-        result = await asyncio.wait_for(
-            graph.ainvoke(
-                {"messages": [HumanMessage(content=question)]},
-                config={"recursion_limit": INVESTIGATOR_RECURSION_LIMIT},
-            ),
-            timeout=INVESTIGATOR_TIMEOUT_SECONDS,
-        )
+        last_call_start = time.time()
+        async for event in graph.astream(
+            {"messages": [HumanMessage(content=question)]},
+            config={"recursion_limit": INVESTIGATOR_RECURSION_LIMIT},
+            stream_mode="updates",
+        ):
+            if "agent" in event:
+                msgs = event["agent"].get("messages", [])
+                if msgs:
+                    last = msgs[-1]
+                    tc = getattr(last, "tool_calls", None)
+                    if tc:
+                        names = [t.get("name", "") for t in tc]
+                        last_call_start = time.time()
+                        print(
+                            f"[investigate] sub_tool_calls: {names} q={q_tag!r}",
+                            flush=True,
+                        )
+                    else:
+                        final_text = _extract_text(last.content)
+            elif "tools" in event:
+                batch_elapsed = time.time() - last_call_start
+                for msg in event["tools"].get("messages", []):
+                    name = getattr(msg, "name", None)
+                    if not name:
+                        continue
+                    tool_count += 1
+                    status = (
+                        "error" if getattr(msg, "status", None) == "error" else "ok"
+                    )
+                    content_str = str(msg.content) if msg.content is not None else ""
+                    size = len(content_str)
+                    preview = content_str[:150]
+                    print(
+                        f"[investigate] sub_tool_result: {name} ({status}) "
+                        f"size={size} batch_elapsed={batch_elapsed:.2f}s "
+                        f"q={q_tag!r} -> {preview}",
+                        flush=True,
+                    )
+
+    try:
+        await asyncio.wait_for(_run(), timeout=INVESTIGATOR_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         logger.warning("[investigate] timeout q=%r", question[:100])
+        print(
+            f"[investigate] timeout elapsed={time.time() - start:.2f}s "
+            f"tools={tool_count} q={q_tag!r}",
+            flush=True,
+        )
         return (
             f"Investigator failed: timed out after {INVESTIGATOR_TIMEOUT_SECONDS}s. "
             f"Try a more focused question."
         )
     except Exception as e:
         logger.exception("[investigate] error q=%r", question[:100])
+        print(
+            f"[investigate] error elapsed={time.time() - start:.2f}s "
+            f"tools={tool_count} q={q_tag!r}: {type(e).__name__}: {e}",
+            flush=True,
+        )
         return f"Investigator failed: {type(e).__name__}: {e}"
 
-    messages = result.get("messages") if isinstance(result, dict) else None
-    if not messages:
-        return "Investigator failed: no response from sub-agent."
-    answer = _extract_text(messages[-1].content).strip()
     elapsed = time.time() - start
-    tool_count = sum(1 for m in messages if getattr(m, "type", None) == "tool")
+    print(
+        f"[investigate] done elapsed={elapsed:.2f}s tools={tool_count} q={q_tag!r}",
+        flush=True,
+    )
     logger.info(
         "[investigate] done elapsed=%.2fs tools=%d q=%r",
         elapsed,
         tool_count,
         question[:100],
     )
+    answer = final_text.strip() if final_text else ""
     return answer or "Investigator failed: empty response."
 
 

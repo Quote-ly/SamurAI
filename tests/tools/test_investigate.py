@@ -88,8 +88,9 @@ def test_investigator_config_constants():
         INVESTIGATOR_TIMEOUT_SECONDS,
     )
 
-    assert 10 <= INVESTIGATOR_RECURSION_LIMIT <= 50
-    assert 10 <= INVESTIGATOR_TIMEOUT_SECONDS <= 180
+    # Raised after first prod test showed 30 steps / 60s was too tight for Flash.
+    assert 30 <= INVESTIGATOR_RECURSION_LIMIT <= 75
+    assert 30 <= INVESTIGATOR_TIMEOUT_SECONDS <= 300
 
 
 # --- _extract_text helper ---
@@ -245,6 +246,72 @@ async def test_investigate_routes_through_tool_node_when_tool_calls_present(mock
     assert result == "Synced and done."
     # Both LLM turns should have fired — confirming the graph looped tools → agent.
     assert mock_llm.ainvoke.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_investigate_logs_sub_tool_activity(mock_llm, capsys):
+    """Sub-agent should emit [investigate] sub_tool_calls and sub_tool_result
+    lines so failures are diagnosable in Cloud Logging."""
+    first = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "sync_repo",
+                "args": {
+                    "repo": "Quote-ly/quotely-data-service",
+                    "branch": "main",
+                },
+                "id": "call-log-1",
+            }
+        ],
+    )
+    final = AIMessage(content="Logged and done.")
+    mock_llm.ainvoke = AsyncMock(side_effect=[first, final])
+
+    with (
+        patch("tools.repo_sync._get_remote_sha", return_value="abc"),
+        patch("tools.repo_sync._get_local_sha", return_value="abc"),
+        patch("tools.github._github_token", return_value="fake"),
+    ):
+        from tools.investigate import investigate
+
+        result = await investigate.ainvoke({"question": "log me"})
+
+    assert result == "Logged and done."
+    out = capsys.readouterr().out
+    # Start and done markers
+    assert "[investigate] start" in out
+    assert "[investigate] done" in out
+    # Sub-agent tool dispatch and result lines with the key observability fields
+    assert "[investigate] sub_tool_calls:" in out
+    assert "sync_repo" in out
+    assert "[investigate] sub_tool_result:" in out
+    assert "size=" in out
+    assert "batch_elapsed=" in out
+
+
+@pytest.mark.asyncio
+async def test_investigate_logs_timeout_with_tool_count(mock_llm, capsys):
+    """On timeout, the log line should include elapsed and tools count so we
+    can see how far the sub-agent got before running out."""
+
+    async def hang(_messages):
+        await asyncio.sleep(5)
+        return AIMessage(content="never")
+
+    mock_llm.ainvoke = hang
+
+    import tools.investigate as mod
+
+    with patch.object(mod, "INVESTIGATOR_TIMEOUT_SECONDS", 0.1):
+        mod._reset_graph()
+        result = await mod.investigate.ainvoke({"question": "hang"})
+
+    assert result.startswith("Investigator failed:")
+    out = capsys.readouterr().out
+    assert "[investigate] timeout" in out
+    assert "elapsed=" in out
+    assert "tools=" in out
 
 
 @pytest.mark.asyncio
