@@ -187,11 +187,80 @@ def read_repo_file(
 
 
 @tool
+def read_repo_file_range(
+    file_path: str,
+    start_line: int,
+    end_line: int,
+    repo: str = "Quote-ly/quotely-data-service",
+    branch: str = "main",
+) -> str:
+    """Read a specific line range from a file in a locally synced repo.
+
+    Use this instead of read_repo_file when you already know which lines matter
+    (e.g. from a search_repo_code hit). Returns only the requested lines, each
+    prefixed with its 1-indexed line number.
+
+    Call sync_repo first if you haven't already synced this repo+branch.
+
+    Args:
+        file_path: Path relative to repo root.
+        start_line: 1-indexed start line (inclusive).
+        end_line: 1-indexed end line (inclusive). Clamped to EOF.
+        repo: Repository in 'owner/repo' format.
+        branch: Branch name.
+    """
+    if repo not in ALLOWED_REPOS:
+        return f"Error: '{repo}' is not a whitelisted repo."
+
+    if start_line < 1 or end_line < start_line:
+        return (
+            f"Error: invalid range {start_line}-{end_line} "
+            f"(start_line must be >= 1 and <= end_line)."
+        )
+
+    local_dir = _repo_dir(repo, branch)
+    full_path = os.path.join(local_dir, file_path)
+
+    if not os.path.exists(local_dir):
+        return (
+            f"Repo not synced yet. Call sync_repo(repo='{repo}', branch='{branch}') first."
+        )
+
+    if not os.path.exists(full_path):
+        return f"File not found: {file_path} in {repo} ({branch})"
+
+    if not os.path.isfile(full_path):
+        return f"'{file_path}' is a directory, not a file. Use list_repo_files to browse."
+
+    try:
+        with open(full_path, "r", errors="replace") as f:
+            lines = f.readlines()
+
+        total = len(lines)
+        if start_line > total:
+            return (
+                f"start_line {start_line} is past end of file "
+                f"({file_path} has {total} lines)."
+            )
+
+        end = min(end_line, total)
+        selected = lines[start_line - 1 : end]
+        numbered = [
+            f"{start_line + i}: {line.rstrip()}" for i, line in enumerate(selected)
+        ]
+        header = f"{file_path} lines {start_line}-{end} (of {total}):\n"
+        return header + "\n".join(numbered)
+    except Exception as e:
+        return f"Error reading {file_path} lines {start_line}-{end_line}: {e}"
+
+
+@tool
 def search_repo_code(
     query: str,
     repo: str = "Quote-ly/quotely-data-service",
     branch: str = "main",
     file_pattern: str = "",
+    context_lines: int = 2,
 ) -> str:
     """Search for a pattern in a locally synced repo using grep.
 
@@ -202,6 +271,8 @@ def search_repo_code(
         repo: Repository in 'owner/repo' format.
         branch: Branch name.
         file_pattern: Optional glob to filter files (e.g. '*.py', '*.vue').
+        context_lines: Lines of surrounding context to include per match (grep -C).
+            Default 2. Set to 0 for match-only output.
     """
     if repo not in ALLOWED_REPOS:
         return f"Error: '{repo}' is not a whitelisted repo."
@@ -213,9 +284,12 @@ def search_repo_code(
             f"Repo not synced yet. Call sync_repo(repo='{repo}', branch='{branch}') first."
         )
 
-    cmd = ["grep", "-rn", "--include", file_pattern or "*", query, local_dir]
-    if not file_pattern:
-        cmd = ["grep", "-rn", query, local_dir]
+    cmd = ["grep", "-rn"]
+    if context_lines and context_lines > 0:
+        cmd += ["-C", str(context_lines)]
+    if file_pattern:
+        cmd += ["--include", file_pattern]
+    cmd += [query, local_dir]
 
     try:
         result = subprocess.run(
@@ -240,7 +314,7 @@ def search_repo_code(
 
         output = "\n".join(formatted)
         if len(lines) > 50:
-            output += f"\n\n... [{len(lines)} total matches, showing first 50]"
+            output += f"\n\n... [{len(lines)} total lines, showing first 50]"
 
         return output
 
@@ -314,6 +388,7 @@ def list_repo_files(
 REPO_SYNC_TOOLS = [
     sync_repo,
     read_repo_file,
+    read_repo_file_range,
     search_repo_code,
     list_repo_files,
 ]

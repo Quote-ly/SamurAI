@@ -44,6 +44,7 @@ from tools.fedramp import FEDRAMP_TOOLS
 from tools.fedramp_docs import FEDRAMP_DOC_TOOLS
 from tools.fedramp_oscal import FEDRAMP_OSCAL_TOOLS
 from tools.repo_sync import REPO_SYNC_TOOLS
+from tools.investigate import INVESTIGATE_TOOLS
 from tools.file_handler import FILE_HANDLER_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -143,11 +144,14 @@ TOOL_GROUPS = {
         ],
     },
     "repo": {
-        "tools": REPO_SYNC_TOOLS,
+        "tools": REPO_SYNC_TOOLS + INVESTIGATE_TOOLS,
         "keywords": [
             "sync repo", "sync the", "pull the code", "read code",
             "search code", "source code", "troubleshoot", "debug",
             "codebase", "main.py", "config.py", "list files",
+            # Broader troubleshooting intents — dispatch the investigate sub-agent
+            "investigate", "root cause", "why is", "broken",
+            "traceback", "stack trace", "what's wrong",
         ],
     },
 }
@@ -197,8 +201,9 @@ SYSTEM_PROMPT = (
     "- Don't make redundant calls — if you already checked something, don't check it again.\n"
     "- After gathering enough information, synthesize and respond. Don't keep investigating.\n"
     "- STEP BUDGET: Simple queries (logs, status, list services) should use 2-4 tool calls. "
-    "Complex investigations (troubleshooting, root cause) can use up to 10-12. "
-    "If you've made 10+ tool calls, stop and synthesize what you have.\n"
+    "For troubleshooting and root-cause analysis, dispatch parallel investigate() calls "
+    "(see TROUBLESHOOTING WORKFLOW) — no hard cap, stop only when you have a concrete "
+    "root cause (file:line + fix) or clear evidence the problem isn't in the code.\n"
     "- For GCP queries: call query_cloud_logs once per relevant project and respond. "
     "Do NOT refine filters or make follow-up queries unless the user asks.\n"
     "- Do NOT explicitly search or save to memory during routine queries — "
@@ -462,13 +467,32 @@ SYSTEM_PROMPT = (
     "NEVER say 'FedRAMP authorized' — say 'pursuing FedRAMP Moderate authorization'.\n\n"
     "Code Troubleshooting & Repo Access:\n"
     "You can sync and read source code from whitelisted GitHub repos locally.\n"
-    "Tools: sync_repo, read_repo_file, search_repo_code, list_repo_files.\n\n"
+    "Tools: sync_repo, read_repo_file, search_repo_code, list_repo_files, investigate.\n\n"
     "TROUBLESHOOTING WORKFLOW:\n"
-    "1. Determine which environment has the issue: production (main branch) or dev (development branch).\n"
-    "2. Call sync_repo to ensure you have the latest code for that branch.\n"
-    "3. Use search_repo_code to find relevant code (error messages, function names, config).\n"
-    "4. Use read_repo_file to read the full source files you need.\n"
-    "5. Cross-reference with logs (query_cloud_logs) and service status (list_cloud_run_services).\n\n"
+    "1. State 2-3 hypotheses you're choosing between BEFORE any tool call. Each "
+    "investigation should discriminate between them.\n"
+    "2. Determine which environment has the issue: production (main branch) or dev "
+    "(development branch). Call sync_repo to ensure the latest code is available.\n"
+    "3. PARALLEL INVESTIGATION (the speed lever): for any non-trivial bug, dispatch "
+    "2-4 investigate() calls IN THE SAME TURN. LangGraph runs them concurrently — "
+    "3 parallel calls take the same wall time as 1. Each investigator is a focused "
+    "Flash-powered sub-agent that returns a written summary so your main context "
+    "stays clean.\n"
+    "   Example for 'why does endpoint X reject API keys':\n"
+    "     investigate('Find the auth dependency used by endpoint X. Cite file:line.')\n"
+    "     investigate('Find the auth dependency used by known-working endpoint Y. Cite file:line.')\n"
+    "     investigate('Does the auth function support API keys? Trace the logic.')\n"
+    "4. For simple single-file questions, skip investigate() and call search_repo_code "
+    "or read_repo_file directly.\n"
+    "5. DUPLICATE IMPLEMENTATION CHECK: when wiring-layer bugs are suspected (auth, "
+    "middleware, DI, dependencies), explicitly search for duplicate definitions of "
+    "the same function/symbol across the repo. Two get_current_user definitions in "
+    "different modules is a common class of bug — don't stop at the first match.\n"
+    "6. Cross-reference findings with logs (query_cloud_logs) and service status "
+    "(list_cloud_run_services).\n"
+    "7. SYNTHESIZE: state which hypothesis the evidence supports, why the others are "
+    "ruled out, and the one-line fix (file:line + change). Don't delegate the "
+    "conclusion to a sub-agent — you own the answer.\n\n"
     "Branch mapping:\n"
     "- Production issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='main')\n"
     "- Development issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='development')\n"
@@ -726,8 +750,10 @@ async def run_agent(
     _tool_labels = {
         "sync_repo": "Syncing repository",
         "read_repo_file": "Reading source code",
+        "read_repo_file_range": "Reading code range",
         "search_repo_code": "Searching codebase",
         "list_repo_files": "Browsing files",
+        "investigate": "Dispatching investigator",
         "query_cloud_logs": "Querying Cloud Logging",
         "list_cloud_run_services": "Checking Cloud Run services",
         "check_gcp_metrics": "Checking metrics",

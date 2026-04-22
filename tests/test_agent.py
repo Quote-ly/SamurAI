@@ -45,7 +45,7 @@ def mock_llm():
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
     assert len(agent.STATIC_TOOLS) == len(agent.ALL_TOOLS)
-    assert len(agent.ALL_TOOLS) == 73  # Static tools (memory tools added per-user separately)
+    assert len(agent.ALL_TOOLS) == 75  # Static tools (memory tools added per-user separately)
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -96,8 +96,11 @@ def test_static_tools_list(mock_llm):
     # Repo sync tools
     assert "sync_repo" in tool_names
     assert "read_repo_file" in tool_names
+    assert "read_repo_file_range" in tool_names
     assert "search_repo_code" in tool_names
     assert "list_repo_files" in tool_names
+    # Investigate sub-agent
+    assert "investigate" in tool_names
     # GitHub close issue
     assert "github_close_issue" in tool_names
 
@@ -124,6 +127,23 @@ def test_system_prompt_defined(mock_llm):
     assert "STEP BUDGET" in agent.SYSTEM_PROMPT
     assert "2-4 tool calls" in agent.SYSTEM_PROMPT
     assert "memory retrieval and extraction happen automatically" in agent.SYSTEM_PROMPT
+
+
+def test_system_prompt_troubleshooting_hardening(mock_llm):
+    """Tier 1 prompt edits: hypothesis discipline, parallel investigate dispatch,
+    duplicate-implementation check, no hard cap for troubleshooting."""
+    _, agent = mock_llm
+    prompt = agent.SYSTEM_PROMPT
+    # Hypothesis discipline — state 2-3 hypotheses before investigating
+    assert "hypotheses" in prompt.lower()
+    # Parallel investigate() dispatch is the speed lever
+    assert "investigate(" in prompt
+    assert "PARALLEL INVESTIGATION" in prompt
+    assert "same turn" in prompt.lower() or "same wall time" in prompt.lower()
+    # Duplicate implementation check (the activities bug class)
+    assert "DUPLICATE IMPLEMENTATION" in prompt
+    # No hard tool-call cap for troubleshooting
+    assert "no hard cap" in prompt.lower()
 
 
 def test_select_tool_groups_core_only(mock_llm):
@@ -171,6 +191,34 @@ def test_select_tool_groups_troubleshoot(mock_llm):
     assert "sync_repo" in names
     assert "read_repo_file" in names
     assert "search_repo_code" in names
+
+
+def test_select_tool_groups_loads_investigate_on_troubleshoot(mock_llm):
+    """Troubleshoot / root-cause / why-is queries should also load the investigate
+    sub-agent, since it lives in the repo tool group."""
+    _, agent = mock_llm
+    for msg in [
+        "troubleshoot the production errors",
+        "why is the activities endpoint broken",
+        "investigate the timeout errors",
+        "find the root cause of the 500s",
+        "this traceback keeps showing up",
+    ]:
+        names = {t.name for t in agent._select_tool_groups(msg)}
+        assert "investigate" in names, f"investigate not loaded for: {msg!r}"
+
+
+def test_select_tool_groups_investigate_not_loaded_for_simple(mock_llm):
+    """Simple non-troubleshoot queries should NOT pull in the investigate tool."""
+    _, agent = mock_llm
+    for msg in [
+        "check the logs",
+        "list cloud run services",
+        "show me the open PRs",
+        "send a message to Cyrus",
+    ]:
+        names = {t.name for t in agent._select_tool_groups(msg)}
+        assert "investigate" not in names, f"investigate wrongly loaded for: {msg!r}"
 
 
 def test_select_tool_groups_social(mock_llm):
