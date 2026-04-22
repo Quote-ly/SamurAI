@@ -402,6 +402,17 @@ async def retrieve_relevant_memories(user_id: str, query: str) -> str | None:
             lines = [_format_memory(r) for r in user_results]
             sections.append("Personal context:\n" + "\n".join(lines))
 
+        # Troubleshooting patterns live in their own namespace with structured
+        # fields; dedicated retriever handles formatting + retrieval counting.
+        try:
+            from tools.troubleshooting import retrieve_troubleshooting_patterns
+
+            ts = retrieve_troubleshooting_patterns(query, limit=3)
+            if ts:
+                sections.append(ts)
+        except Exception as e:
+            logger.debug("Troubleshooting retrieval failed: %s", e)
+
         if not sections:
             return None
 

@@ -46,6 +46,7 @@ from tools.fedramp_docs import FEDRAMP_DOC_TOOLS
 from tools.fedramp_oscal import FEDRAMP_OSCAL_TOOLS
 from tools.repo_sync import REPO_SYNC_TOOLS
 from tools.investigate import INVESTIGATE_TOOLS
+from tools.troubleshooting import TROUBLESHOOTING_TOOLS
 from tools.file_handler import FILE_HANDLER_TOOLS
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ TOOL_GROUPS = {
         ],
     },
     "repo": {
-        "tools": REPO_SYNC_TOOLS + INVESTIGATE_TOOLS + [github_search_issues],
+        "tools": REPO_SYNC_TOOLS + INVESTIGATE_TOOLS + TROUBLESHOOTING_TOOLS + [github_search_issues],
         "keywords": [
             "sync repo", "sync the", "pull the code", "read code",
             "search code", "source code", "troubleshoot", "debug",
@@ -499,7 +500,14 @@ SYSTEM_PROMPT = (
     "(list_cloud_run_services).\n"
     "8. SYNTHESIZE: state which hypothesis the evidence supports, why the others are "
     "ruled out, and the one-line fix (file:line + change). Don't delegate the "
-    "conclusion to a sub-agent — you own the answer.\n\n"
+    "conclusion to a sub-agent — you own the answer.\n"
+    "9. SAVE THE PATTERN: if you reached a concrete root cause with file:line "
+    "evidence AND the pattern could plausibly recur, call save_troubleshooting_step "
+    "ONCE at the end. Populate hypotheses_ruled_out with the dead-ends you "
+    "investigated — dead ends are as valuable as wins. Skip the save for one-off "
+    "typos, trivial bugs, or cases where you only speculated. Prior saved patterns "
+    "for similar symptoms are retrieved automatically and appear in the system "
+    "prompt under 'Prior troubleshooting patterns' — read them first.\n\n"
     "Branch mapping:\n"
     "- Production issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='main')\n"
     "- Development issues: sync_repo(repo='Quote-ly/quotely-data-service', branch='development')\n"
@@ -761,6 +769,9 @@ async def run_agent(
         "search_repo_code": "Searching codebase",
         "list_repo_files": "Browsing files",
         "investigate": "Dispatching investigator",
+        "save_troubleshooting_step": "Saving troubleshooting pattern",
+        "search_troubleshooting": "Searching troubleshooting patterns",
+        "delete_troubleshooting_step": "Removing troubleshooting pattern",
         "query_cloud_logs": "Querying Cloud Logging",
         "list_cloud_run_services": "Checking Cloud Run services",
         "check_gcp_metrics": "Checking metrics",

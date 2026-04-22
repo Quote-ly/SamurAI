@@ -45,7 +45,7 @@ def mock_llm():
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
     assert len(agent.STATIC_TOOLS) == len(agent.ALL_TOOLS)
-    assert len(agent.ALL_TOOLS) == 76  # Static tools (memory tools added per-user separately)
+    assert len(agent.ALL_TOOLS) == 79  # Static tools (memory tools added per-user separately)
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -102,6 +102,10 @@ def test_static_tools_list(mock_llm):
     assert "list_repo_files" in tool_names
     # Investigate sub-agent
     assert "investigate" in tool_names
+    # Troubleshooting DB tools
+    assert "save_troubleshooting_step" in tool_names
+    assert "search_troubleshooting" in tool_names
+    assert "delete_troubleshooting_step" in tool_names
     # GitHub close issue
     assert "github_close_issue" in tool_names
 
@@ -148,6 +152,9 @@ def test_system_prompt_troubleshooting_hardening(mock_llm):
     # Issue-search-first is the Phase 1 knowledge-base retrieval lever
     assert "github_search_issues" in prompt
     assert "ISSUE SEARCH FIRST" in prompt
+    # Phase 2: autonomous save at the end of a successful bug hunt
+    assert "save_troubleshooting_step" in prompt
+    assert "SAVE THE PATTERN" in prompt
 
 
 def test_select_tool_groups_core_only(mock_llm):
