@@ -282,6 +282,68 @@ async def test_retrieve_relevant_memories_empty():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_relevant_memories_emits_observability_log(capsys):
+    """Every retrieval emits a single [memory] retrieved line to stdout so
+    Cloud Logging can show what was injected into the system prompt."""
+    from memory import retrieve_relevant_memories, CORE_NAMESPACE, TEAM_NAMESPACE
+
+    mock_store = MagicMock()
+    core_result = MagicMock()
+    core_result.value = {"content": "recipe"}
+    team_result = MagicMock()
+    team_result.value = {"content": "team fact"}
+
+    def _search(namespace, query, limit=3):
+        if namespace == CORE_NAMESPACE:
+            return [core_result]
+        if namespace == TEAM_NAMESPACE:
+            return [team_result, team_result]
+        return []
+
+    mock_store.search.side_effect = _search
+
+    with (
+        patch("memory.get_memory_store", return_value=mock_store),
+        patch(
+            "tools.troubleshooting.retrieve_troubleshooting_patterns",
+            return_value="Prior troubleshooting patterns:\n- first\n- second\n- third",
+        ),
+    ):
+        await retrieve_relevant_memories("user-abc", "api key failure on activities")
+
+    out = capsys.readouterr().out
+    assert "[memory] retrieved" in out
+    assert "core=1" in out
+    assert "team=2" in out
+    assert "user=0" in out
+    assert "troubleshooting=3" in out
+    assert "user_id='user-abc'" in out
+    assert "api key failure on activities" in out
+
+
+@pytest.mark.asyncio
+async def test_retrieve_log_fires_even_when_nothing_matches(capsys):
+    """The log line must always emit — zero hits is also useful signal."""
+    from memory import retrieve_relevant_memories
+
+    mock_store = MagicMock()
+    mock_store.search.return_value = []
+
+    with (
+        patch("memory.get_memory_store", return_value=mock_store),
+        patch(
+            "tools.troubleshooting.retrieve_troubleshooting_patterns",
+            return_value=None,
+        ),
+    ):
+        await retrieve_relevant_memories("user1", "no matches expected")
+
+    out = capsys.readouterr().out
+    assert "[memory] retrieved" in out
+    assert "core=0 team=0 user=0 troubleshooting=0" in out
+
+
+@pytest.mark.asyncio
 async def test_retrieve_relevant_memories_partial_tiers():
     """Only tiers with results should appear in the output."""
     from memory import retrieve_relevant_memories, CORE_NAMESPACE, TEAM_NAMESPACE

@@ -83,6 +83,9 @@ def get_memory_store():
         # Load persisted memories from SQLite
         _load_persisted_memories(_store)
         logger.info("LangMem memory store ready (InMemoryStore + SQLite backup)")
+        # print() mirrors the logger line so it's guaranteed to surface in
+        # Cloud Run's captured stdout (some logger handlers silently drop).
+        print("[memory] store ready", flush=True)
     return _store
 
 
@@ -108,8 +111,10 @@ def _load_persisted_memories(store):
         conn.close()
         if count:
             logger.info("Loaded %d persisted memories from SQLite", count)
+            print(f"[memory] loaded {count} persisted memories from SQLite", flush=True)
     except Exception as e:
         logger.warning("Failed to load persisted memories: %s", e)
+        print(f"[memory] load failed: {type(e).__name__}: {e}", flush=True)
 
 
 def persist_memories():
@@ -406,14 +411,29 @@ async def retrieve_relevant_memories(user_id: str, query: str) -> str | None:
 
         # Troubleshooting patterns live in their own namespace with structured
         # fields; dedicated retriever handles formatting + retrieval counting.
+        ts_count = 0
         try:
             from tools.troubleshooting import retrieve_troubleshooting_patterns
 
             ts = retrieve_troubleshooting_patterns(query, limit=3)
             if ts:
                 sections.append(ts)
+                # The formatter emits one leading "- " bullet per match.
+                ts_count = ts.count("\n- ") + (1 if ts.startswith("- ") else 0)
+                # Fallback: count lines that start with "- " after the header.
+                if ts_count == 0:
+                    ts_count = sum(1 for line in ts.splitlines() if line.startswith("- "))
         except Exception as e:
             logger.debug("Troubleshooting retrieval failed: %s", e)
+
+        # Single-line observability: what landed in the system prompt this turn.
+        # Visible in Cloud Logging so we can see retrieval quality in real time.
+        print(
+            f"[memory] retrieved core={len(core_results)} team={len(team_results)} "
+            f"user={len(user_results)} troubleshooting={ts_count} "
+            f"query={query[:80]!r} user_id={user_id!r}",
+            flush=True,
+        )
 
         if not sections:
             return None
