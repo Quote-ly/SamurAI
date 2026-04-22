@@ -40,20 +40,22 @@ _team_executor = None
 def _create_embed_fn():
     """Create an embedding function using Vertex AI (service-account auth).
 
-    We use langchain-google-vertexai.VertexAIEmbeddings here rather than
-    langchain-google-genai.GoogleGenerativeAIEmbeddings because the latter is
-    Gemini-Developer-API-only (requires GOOGLE_API_KEY) and this bot
-    authenticates against Vertex via the Cloud Run service account.
+    Uses langchain_google_genai.GoogleGenerativeAIEmbeddings with vertexai=True,
+    the same pattern as ChatGoogleGenerativeAI elsewhere in the bot. Without
+    the vertexai flag this class defaults to the Gemini Developer API and
+    requires GOOGLE_API_KEY — which the Cloud Run service account cannot
+    provide.
     """
     _embeddings = None
 
     def embed(texts: list[str]) -> list[list[float]]:
         nonlocal _embeddings
         if _embeddings is None:
-            from langchain_google_vertexai import VertexAIEmbeddings
+            from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-            _embeddings = VertexAIEmbeddings(
-                model_name="text-embedding-005",
+            _embeddings = GoogleGenerativeAIEmbeddings(
+                model="text-embedding-005",
+                vertexai=True,
                 project=os.environ.get("GCP_PROJECT_ID"),
                 location=os.environ.get("GCP_LOCATION", "us-central1"),
             )

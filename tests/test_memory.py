@@ -42,30 +42,36 @@ def test_embed_fn_uses_vertex_ai_not_gemini_api():
     mock_instance.embed_documents.return_value = [[0.2] * 768]
 
     with patch(
-        "langchain_google_vertexai.VertexAIEmbeddings", return_value=mock_instance
+        "langchain_google_genai.GoogleGenerativeAIEmbeddings",
+        return_value=mock_instance,
     ) as mock_cls:
         embed = _create_embed_fn()
         embed(["hello"])  # triggers lazy init
 
     assert mock_cls.call_count == 1
     kwargs = mock_cls.call_args.kwargs
-    assert kwargs.get("model_name") == "text-embedding-005"
-    # Service-account path uses project + location, NOT api_key
+    assert kwargs.get("model") == "text-embedding-005"
+    # THE CRITICAL FLAG: without vertexai=True the class defaults to the
+    # Gemini Developer API and will reject the service-account token.
+    assert kwargs.get("vertexai") is True
     assert "project" in kwargs
     assert "location" in kwargs
+    # Service-account path — no API key should be passed
     assert "api_key" not in kwargs
+    assert "google_api_key" not in kwargs
 
 
 def test_embed_fn_lazy_and_reused():
-    """The underlying VertexAIEmbeddings client should be instantiated once
-    and reused for subsequent calls, to avoid auth churn."""
+    """The underlying embeddings client should be instantiated once and reused
+    for subsequent calls, to avoid auth churn."""
     from memory import _create_embed_fn
 
     mock_instance = MagicMock()
     mock_instance.embed_documents.return_value = [[0.2] * 768]
 
     with patch(
-        "langchain_google_vertexai.VertexAIEmbeddings", return_value=mock_instance
+        "langchain_google_genai.GoogleGenerativeAIEmbeddings",
+        return_value=mock_instance,
     ) as mock_cls:
         embed = _create_embed_fn()
         embed(["one"])

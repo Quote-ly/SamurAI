@@ -3,7 +3,6 @@ botbuilder-integration-aiohttp>=4.14
 langgraph>=1.1
 langgraph-checkpoint-sqlite>=3.0
 langchain-google-genai>=4.0
-langchain-google-vertexai>=2.0
 langchain-core>=1.2
 google-cloud-logging>=3.0
 google-cloud-monitoring>=2.0
