@@ -248,3 +248,123 @@ def test_commit_diff_no_patch(mock_gh):
 
     assert "image.png" in result
     assert "```diff" not in result  # No patch block for None patch
+
+
+# --- github_search_issues ---
+
+
+def _make_issue(number, title, state="closed", labels=None, is_pr=False):
+    issue = MagicMock()
+    issue.number = number
+    issue.title = title
+    issue.state = state
+    lbls = []
+    for name in labels or []:
+        lbl = MagicMock()
+        lbl.name = name
+        lbls.append(lbl)
+    issue.labels = lbls
+    issue.pull_request = MagicMock() if is_pr else None
+    return issue
+
+
+@patch("tools.github._github")
+def test_search_issues_scopes_query_to_repo(mock_gh):
+    """The tool must auto-inject repo: scope so the agent doesn't accidentally
+    search across all of GitHub."""
+    from tools.github import github_search_issues
+
+    mock_gh.return_value.search_issues.return_value = []
+    github_search_issues.invoke(
+        {"query": "api key activities", "repo": "Quote-ly/quotely-data-service"}
+    )
+
+    query_arg = mock_gh.return_value.search_issues.call_args.kwargs.get(
+        "query"
+    ) or mock_gh.return_value.search_issues.call_args.args[0]
+    assert "repo:Quote-ly/quotely-data-service" in query_arg
+    assert "api key activities" in query_arg
+
+
+@patch("tools.github._github")
+def test_search_issues_strips_repo_qualifier_if_model_adds_it(mock_gh):
+    """If the model includes `repo:...` in the query we strip it — otherwise
+    GitHub sees two repo: qualifiers and errors / narrows incorrectly."""
+    from tools.github import github_search_issues
+
+    mock_gh.return_value.search_issues.return_value = []
+    github_search_issues.invoke(
+        {"query": "repo:foo/bar some symptom", "repo": "Quote-ly/quotely-data-service"}
+    )
+
+    query_arg = mock_gh.return_value.search_issues.call_args.kwargs.get(
+        "query"
+    ) or mock_gh.return_value.search_issues.call_args.args[0]
+    # Exactly one repo: qualifier, and it's the tool's, not the model's
+    assert query_arg.count("repo:") == 1
+    assert "repo:Quote-ly/quotely-data-service" in query_arg
+    assert "some symptom" in query_arg
+
+
+@patch("tools.github._github")
+def test_search_issues_formats_results(mock_gh):
+    from tools.github import github_search_issues
+
+    results = [
+        _make_issue(522, "Activities endpoints reject API key", "closed", ["bug", "P2"]),
+        _make_issue(480, "Login PR fix", "closed", ["bug"], is_pr=True),
+    ]
+    # PyGithub's PaginatedList supports slicing with [:N]
+    paginated = MagicMock()
+    paginated.__iter__ = lambda s: iter(results)
+    paginated.__getitem__ = lambda s, k: results[k]
+    mock_gh.return_value.search_issues.return_value = paginated
+
+    out = github_search_issues.invoke(
+        {"query": "api key", "repo": "Quote-ly/quotely-data-service"}
+    )
+
+    assert "#522" in out
+    assert "Activities endpoints reject API key" in out
+    assert "bug" in out
+    assert "[issue, closed]" in out
+    assert "[PR, closed]" in out
+
+
+@patch("tools.github._github")
+def test_search_issues_no_matches(mock_gh):
+    from tools.github import github_search_issues
+
+    paginated = MagicMock()
+    paginated.__iter__ = lambda s: iter([])
+    paginated.__getitem__ = lambda s, k: []
+    mock_gh.return_value.search_issues.return_value = paginated
+
+    out = github_search_issues.invoke({"query": "nonexistent", "repo": "org/repo"})
+    assert "No issues" in out
+
+
+@patch("tools.github._github")
+def test_search_issues_handles_exception(mock_gh):
+    """Rate-limit or auth errors should return a string, not raise."""
+    from tools.github import github_search_issues
+
+    mock_gh.return_value.search_issues.side_effect = RuntimeError("rate limited")
+    out = github_search_issues.invoke({"query": "anything", "repo": "org/repo"})
+    assert "Search failed" in out
+    assert "rate limited" in out
+
+
+@patch("tools.github._github")
+def test_search_issues_state_filter(mock_gh):
+    from tools.github import github_search_issues
+
+    mock_gh.return_value.search_issues.return_value = []
+    github_search_issues.invoke(
+        {"query": "foo", "repo": "org/repo", "state": "closed"}
+    )
+
+    query_arg = mock_gh.return_value.search_issues.call_args.kwargs.get(
+        "query"
+    ) or mock_gh.return_value.search_issues.call_args.args[0]
+    assert "state:closed" in query_arg

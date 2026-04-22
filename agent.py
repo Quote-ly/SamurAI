@@ -28,6 +28,7 @@ from tools.github import (
     github_list_recent_commits,
     github_get_commit_diff,
     github_list_issues,
+    github_search_issues,
     github_get_issue_details,
     github_create_issue,
     github_list_workflow_runs,
@@ -91,6 +92,7 @@ TOOL_GROUPS = {
             github_list_recent_commits,
             github_get_commit_diff,
             github_list_issues,
+            github_search_issues,
             github_get_issue_details,
             github_create_issue,
             github_list_workflow_runs,
@@ -144,7 +146,7 @@ TOOL_GROUPS = {
         ],
     },
     "repo": {
-        "tools": REPO_SYNC_TOOLS + INVESTIGATE_TOOLS,
+        "tools": REPO_SYNC_TOOLS + INVESTIGATE_TOOLS + [github_search_issues],
         "keywords": [
             "sync repo", "sync the", "pull the code", "read code",
             "search code", "source code", "troubleshoot", "debug",
@@ -471,9 +473,14 @@ SYSTEM_PROMPT = (
     "TROUBLESHOOTING WORKFLOW:\n"
     "1. State 2-3 hypotheses you're choosing between BEFORE any tool call. Each "
     "investigation should discriminate between them.\n"
-    "2. Determine which environment has the issue: production (main branch) or dev "
+    "2. ISSUE SEARCH FIRST: call github_search_issues with keywords from the symptom "
+    "on the relevant repo (default Quote-ly/quotely-data-service) BEFORE investigate() "
+    "or code reads. If a closed bug issue already matches, prior investigation likely "
+    "solved it — cite the issue and synthesize from there instead of re-investigating. "
+    "Include this call in your first parallel batch.\n"
+    "3. Determine which environment has the issue: production (main branch) or dev "
     "(development branch). Call sync_repo to ensure the latest code is available.\n"
-    "3. PARALLEL INVESTIGATION (the speed lever): for any non-trivial bug, dispatch "
+    "4. PARALLEL INVESTIGATION (the speed lever): for any non-trivial bug, dispatch "
     "2-4 investigate() calls IN THE SAME TURN. LangGraph runs them concurrently — "
     "3 parallel calls take the same wall time as 1. Each investigator is a focused "
     "Flash-powered sub-agent that returns a written summary so your main context "
@@ -482,15 +489,15 @@ SYSTEM_PROMPT = (
     "     investigate('Find the auth dependency used by endpoint X. Cite file:line.')\n"
     "     investigate('Find the auth dependency used by known-working endpoint Y. Cite file:line.')\n"
     "     investigate('Does the auth function support API keys? Trace the logic.')\n"
-    "4. For simple single-file questions, skip investigate() and call search_repo_code "
+    "5. For simple single-file questions, skip investigate() and call search_repo_code "
     "or read_repo_file directly.\n"
-    "5. DUPLICATE IMPLEMENTATION CHECK: when wiring-layer bugs are suspected (auth, "
+    "6. DUPLICATE IMPLEMENTATION CHECK: when wiring-layer bugs are suspected (auth, "
     "middleware, DI, dependencies), explicitly search for duplicate definitions of "
     "the same function/symbol across the repo. Two get_current_user definitions in "
     "different modules is a common class of bug — don't stop at the first match.\n"
-    "6. Cross-reference findings with logs (query_cloud_logs) and service status "
+    "7. Cross-reference findings with logs (query_cloud_logs) and service status "
     "(list_cloud_run_services).\n"
-    "7. SYNTHESIZE: state which hypothesis the evidence supports, why the others are "
+    "8. SYNTHESIZE: state which hypothesis the evidence supports, why the others are "
     "ruled out, and the one-line fix (file:line + change). Don't delegate the "
     "conclusion to a sub-agent — you own the answer.\n\n"
     "Branch mapping:\n"
@@ -763,6 +770,7 @@ async def run_agent(
         "github_list_recent_commits": "Checking recent commits",
         "github_get_commit_diff": "Reading commit diff",
         "github_list_issues": "Checking GitHub issues",
+        "github_search_issues": "Searching GitHub issues",
         "github_get_issue_details": "Reading issue details",
         "github_create_issue": "Creating GitHub issue",
         "github_close_issue": "Closing GitHub issue",

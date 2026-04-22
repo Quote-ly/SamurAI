@@ -54,6 +54,7 @@ def test_investigator_has_only_read_only_tools():
     assert "list_repo_files" in names
     assert "query_cloud_logs" in names
     assert "github_list_issues" in names
+    assert "github_search_issues" in names
     # Forbidden — modification / comms / memory tools
     forbidden = {
         "send_teams_message",

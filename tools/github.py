@@ -177,6 +177,57 @@ def github_list_issues(repo: str, state: str = "open", count: int = 10) -> str:
 
 
 @tool
+def github_search_issues(
+    query: str,
+    repo: str = "Quote-ly/quotely-data-service",
+    state: str = "all",
+    count: int = 10,
+) -> str:
+    """Full-text search GitHub issues and PRs in a repository.
+
+    Use this as the FIRST step in troubleshooting: if a closed bug issue
+    already matches the symptom, you can cite the fix directly instead of
+    re-investigating. This uses GitHub's /search/issues endpoint which
+    indexes title, body, and comments.
+
+    Args:
+        query: Free-text search (e.g. "api key activities endpoint",
+            "500 error auth", "token expired entra"). Do NOT include "repo:"
+            — it is added automatically.
+        repo: Repository in 'owner/repo' format. Defaults to the main data
+            service.
+        state: 'open', 'closed', or 'all' (default). Prefer 'all' for
+            troubleshooting — closed issues often contain the fix.
+        count: Max results to return (default 10).
+    """
+    # Strip any repo: qualifier the model might have included
+    clean_query = " ".join(
+        tok for tok in query.split() if not tok.lower().startswith("repo:")
+    )
+    full_query = f"repo:{repo} {clean_query}"
+    if state in ("open", "closed"):
+        full_query += f" state:{state}"
+
+    try:
+        results = _github().search_issues(query=full_query)
+    except Exception as e:
+        return f"Search failed: {type(e).__name__}: {e}"
+
+    lines = []
+    for issue in results[:count]:
+        labels = ", ".join(l.name for l in issue.labels) if issue.labels else "none"
+        kind = "PR" if issue.pull_request is not None else "issue"
+        lines.append(
+            f"#{issue.number} [{kind}, {issue.state}] {issue.title} "
+            f"(labels: {labels})"
+        )
+    if not lines:
+        return f"No issues or PRs matched '{clean_query}' in {repo}."
+    header = f"Top {len(lines)} matches for '{clean_query}' in {repo}:\n"
+    return header + "\n".join(lines)
+
+
+@tool
 def github_get_issue_details(repo: str, issue_number: int) -> str:
     """Get details of a specific GitHub issue including comments.
 

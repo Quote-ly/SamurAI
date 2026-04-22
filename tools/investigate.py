@@ -22,6 +22,7 @@ from tools.github import (
     github_get_commit_diff,
     github_get_issue_details,
     github_list_issues,
+    github_search_issues,
 )
 from tools.repo_sync import (
     list_repo_files,
@@ -42,6 +43,7 @@ INVESTIGATOR_TOOLS = [
     list_repo_files,
     query_cloud_logs,
     github_list_issues,
+    github_search_issues,
     github_get_issue_details,
     github_get_commit_diff,
 ]

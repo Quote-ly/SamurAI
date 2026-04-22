@@ -45,7 +45,7 @@ def mock_llm():
 def test_static_tools_list(mock_llm):
     _, agent = mock_llm
     assert len(agent.STATIC_TOOLS) == len(agent.ALL_TOOLS)
-    assert len(agent.ALL_TOOLS) == 75  # Static tools (memory tools added per-user separately)
+    assert len(agent.ALL_TOOLS) == 76  # Static tools (memory tools added per-user separately)
     tool_names = {t.name for t in agent.STATIC_TOOLS}
     assert "query_cloud_logs" in tool_names
     assert "list_cloud_run_services" in tool_names
@@ -54,6 +54,7 @@ def test_static_tools_list(mock_llm):
     assert "github_get_pr_details" in tool_names
     assert "github_list_recent_commits" in tool_names
     assert "github_list_issues" in tool_names
+    assert "github_search_issues" in tool_names
     assert "github_get_issue_details" in tool_names
     assert "github_create_issue" in tool_names
     assert "github_list_workflow_runs" in tool_names
@@ -144,6 +145,9 @@ def test_system_prompt_troubleshooting_hardening(mock_llm):
     assert "DUPLICATE IMPLEMENTATION" in prompt
     # No hard tool-call cap for troubleshooting
     assert "no hard cap" in prompt.lower()
+    # Issue-search-first is the Phase 1 knowledge-base retrieval lever
+    assert "github_search_issues" in prompt
+    assert "ISSUE SEARCH FIRST" in prompt
 
 
 def test_select_tool_groups_core_only(mock_llm):
@@ -206,6 +210,11 @@ def test_select_tool_groups_loads_investigate_on_troubleshoot(mock_llm):
     ]:
         names = {t.name for t in agent._select_tool_groups(msg)}
         assert "investigate" in names, f"investigate not loaded for: {msg!r}"
+        # github_search_issues is in the repo group so it loads on
+        # troubleshooting even when no github keyword is present.
+        assert (
+            "github_search_issues" in names
+        ), f"github_search_issues not loaded for: {msg!r}"
 
 
 def test_select_tool_groups_investigate_not_loaded_for_simple(mock_llm):
