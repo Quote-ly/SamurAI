@@ -28,13 +28,61 @@ def _reset_singletons():
     memory._team_executor = None
 
 
+# --- Embedding function (Vertex AI) ---
+
+
+def test_embed_fn_uses_vertex_ai_not_gemini_api():
+    """Memory uses Vertex AI via service-account auth, NOT the Gemini Developer
+    API which requires GOOGLE_API_KEY. This is a regression guard: the bot's
+    service account cannot authenticate against the Gemini Developer API, so a
+    regression here would silently break memory persistence for every user."""
+    from memory import _create_embed_fn
+
+    mock_instance = MagicMock()
+    mock_instance.embed_documents.return_value = [[0.2] * 768]
+
+    with patch(
+        "langchain_google_vertexai.VertexAIEmbeddings", return_value=mock_instance
+    ) as mock_cls:
+        embed = _create_embed_fn()
+        embed(["hello"])  # triggers lazy init
+
+    assert mock_cls.call_count == 1
+    kwargs = mock_cls.call_args.kwargs
+    assert kwargs.get("model_name") == "text-embedding-005"
+    # Service-account path uses project + location, NOT api_key
+    assert "project" in kwargs
+    assert "location" in kwargs
+    assert "api_key" not in kwargs
+
+
+def test_embed_fn_lazy_and_reused():
+    """The underlying VertexAIEmbeddings client should be instantiated once
+    and reused for subsequent calls, to avoid auth churn."""
+    from memory import _create_embed_fn
+
+    mock_instance = MagicMock()
+    mock_instance.embed_documents.return_value = [[0.2] * 768]
+
+    with patch(
+        "langchain_google_vertexai.VertexAIEmbeddings", return_value=mock_instance
+    ) as mock_cls:
+        embed = _create_embed_fn()
+        embed(["one"])
+        embed(["two"])
+        embed(["three"])
+
+    assert mock_cls.call_count == 1  # Lazy + reused
+    assert mock_instance.embed_documents.call_count == 3
+
+
 # --- InMemoryStore ---
 
 
 def test_get_memory_store_returns_store():
     from memory import get_memory_store
 
-    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 1536 for _ in texts]):
+    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 768 for _ in texts]):
         store = get_memory_store()
     assert store is not None
 
@@ -42,7 +90,7 @@ def test_get_memory_store_returns_store():
 def test_get_memory_store_is_singleton():
     from memory import get_memory_store
 
-    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 1536 for _ in texts]):
+    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 768 for _ in texts]):
         store1 = get_memory_store()
         store2 = get_memory_store()
     assert store1 is store2
@@ -51,7 +99,7 @@ def test_get_memory_store_is_singleton():
 def test_store_put_and_search():
     from memory import get_memory_store
 
-    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 1536 for _ in texts]):
+    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 768 for _ in texts]):
         store = get_memory_store()
 
     store.put(("memories", "user1"), "mem1", {"content": "Devin likes Python"})
@@ -63,7 +111,7 @@ def test_store_put_and_search():
 def test_store_user_isolation():
     from memory import get_memory_store
 
-    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 1536 for _ in texts]):
+    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 768 for _ in texts]):
         store = get_memory_store()
 
     store.put(("memories", "user-a"), "m1", {"content": "secret A"})
@@ -85,7 +133,7 @@ def test_persist_and_load_memories(tmp_path):
     memory.MEMORY_DB_PATH = str(tmp_path / "test_memories.sqlite")
     memory.DATA_DIR = str(tmp_path)
 
-    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 1536 for _ in texts]):
+    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 768 for _ in texts]):
         store = memory.get_memory_store()
 
     store.put(("memories", "user1"), "m1", {"content": "fact one"})
@@ -101,7 +149,7 @@ def test_persist_and_load_memories(tmp_path):
 
     # Reset store and reload
     memory._store = None
-    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 1536 for _ in texts]):
+    with patch("memory._create_embed_fn", return_value=lambda texts: [[0.1] * 768 for _ in texts]):
         store2 = memory.get_memory_store()
 
     results = store2.search(("memories", "user1"), query="fact")
