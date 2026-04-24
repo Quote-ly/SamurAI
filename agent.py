@@ -48,6 +48,11 @@ from tools.repo_sync import REPO_SYNC_TOOLS
 from tools.investigate import INVESTIGATE_TOOLS
 from tools.troubleshooting import TROUBLESHOOTING_TOOLS
 from tools.file_handler import FILE_HANDLER_TOOLS
+from verification import (
+    verification_node,
+    should_verify,
+    should_route_from_verification,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -626,17 +631,44 @@ async def _build_graph(user_id: str = "default"):
         return {"messages": [await llm_with_tools.ainvoke(messages)]}
 
     def should_continue(state: MessagesState):
+        """Route after the agent node.
+
+        - If the agent produced tool calls, run them.
+        - Else if verification is enabled (env SAMURAI_VERIFY_MODE !=
+          off), route to the verification node.
+        - Else end the graph.
+        """
         last = state["messages"][-1]
-        if not last.tool_calls:
-            return END
-        return "tools"
+        if getattr(last, "tool_calls", None):
+            return "tools"
+        # No tool calls — draft is ready. Route to verification or END.
+        return should_verify(state)
+
+    def should_continue_after_verification(state: MessagesState):
+        """Route after the verification node.
+
+        If the verifier appended a correction message (ungrounded claims
+        in enforce mode), route back to the agent for another turn.
+        Otherwise end.
+        """
+        return should_route_from_verification(state)
 
     graph = StateGraph(MessagesState)
     graph.add_node("agent", call_model)
     graph.add_node("tools", tool_node)
+    graph.add_node("verify", verification_node)
     graph.add_edge(START, "agent")
-    graph.add_conditional_edges("agent", should_continue)
+    graph.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"tools": "tools", "verify": "verify", "end": END},
+    )
     graph.add_edge("tools", "agent")
+    graph.add_conditional_edges(
+        "verify",
+        should_continue_after_verification,
+        {"agent": "agent", "end": END},
+    )
 
     checkpointer = await get_checkpointer()
     store = get_memory_store()

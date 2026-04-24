@@ -173,6 +173,90 @@ The bot uses a **SingleTenant** Azure Bot Service registration. All three of the
 python -m pytest tests/ -v
 ```
 
+## Hallucination mitigation (Chain-of-Verification)
+
+SamurAI now has a CoVe-style verification node between the agent loop and
+the final response. Purpose: catch fabricated specifics (line numbers,
+counts, API names, file paths) before they reach the user. Motivated by
+observed accuracy gap vs Claude Code on code-analysis tasks —
+see the research log below and the thread in SamurAI session notes for
+Apr 2026.
+
+### Files
+- `verification.py` -- the verifier node. Runs a separate Flash call in a
+  fresh context with only the draft + tool trace. Returns JSON grading
+  each specific claim as grounded / ungrounded / unverifiable.
+- `agent.py` -- wires the node into the LangGraph as a conditional step
+  between `agent` (when it produces a non-tool response) and `END`.
+
+### Configuration (env var `SAMURAI_VERIFY_MODE`)
+- `off` (default): verification skipped entirely. Zero overhead.
+- `shadow`: verification runs, logs what it *would* have rejected, but
+  passes the draft through unchanged. **Use this first** to collect data
+  on what the verifier catches before flipping to enforce.
+- `enforce`: verification runs; ungrounded claims route the graph back
+  to the agent with a structured correction asking it to verify or drop
+  the claim.
+
+### Rollout plan
+1. Deploy with `SAMURAI_VERIFY_MODE=shadow` first.
+2. Watch Cloud Logging for `[verification.shadow]` entries for a week.
+   Grep: `resource.type="cloud_run_revision" jsonPayload.message=~"verification.shadow"`
+3. Spot-check the flagged claims. If the verifier is accurate, flip to
+   `enforce`. If it's over-flagging (false positives), tune the
+   verifier prompt in `verification.py:VERIFIER_SYSTEM_PROMPT` before
+   flipping.
+
+### What was deferred (for a future session to pick up)
+
+1. **System prompt pruning.** `agent.py:SYSTEM_PROMPT` is 340+ lines.
+   Research (RAG-MCP, arXiv 2505.03275) shows 3.2x accuracy improvement
+   from pruning bloated prompts. Suggested approach: mirror the existing
+   `_select_tool_groups()` pattern with `_select_prompt_sections()` that
+   loads FedRAMP / OSCAL / Social / Background Tasks sections only on
+   keyword match. Keep ~60-100 lines of always-on core rules. Deferred
+   to a separate PR to keep this change focused.
+
+2. **Explicit "evidence before claims" rules in the system prompt.**
+   Complementary to the verifier node. Add a short block at the top of
+   `SYSTEM_PROMPT` forbidding specific-number / line-number claims
+   without a supporting tool call in the same turn. Keeps the verifier
+   from having to catch as many issues on the back end.
+
+3. **Verifier prompt tuning.** After shadow data comes in, expect the
+   verifier prompt (`VERIFIER_SYSTEM_PROMPT`) to need iteration on what
+   counts as "a claim" worth checking.
+
+### Research basis (published, Apr 2026)
+- **Chain-of-Verification** (Dhuliawala et al., arXiv:2309.11495, ACL
+  Findings 2024): +23% F1 when verification runs in a *fresh* context,
+  not as self-critique. Implemented here as a separate Flash call with
+  only the draft + tool log in scope.
+- **RAG-MCP prompt bloat study** (arXiv:2505.03275): tool-selection
+  accuracy 13.6% -> 43.1% from pruning a bloated prompt. Motivates the
+  deferred prompt-prune work.
+- **Gemini function-calling hallucination bug** (googleapis/python-genai
+  #813): model can claim tool output that was never returned. The
+  verifier's independent-context design is what catches this.
+- **Artificial Analysis Omniscience Index**: Gemini 3 Pro ~88% hallucination
+  rate on knowledge tasks vs Claude 4.5 tier materially lower. Gap is
+  partly trained-in (Anthropic's Constitutional AI explicitly trains
+  epistemic humility) -- the verifier narrows but does not close it.
+
+### Cost
+One extra Flash call per agent turn that produces a non-tool response.
+Typical latency +200-400ms. Token cost ~1-2k tokens per verification.
+Skips verification on turns with no tool calls (greetings, clarifying
+questions) since there's nothing to ground against.
+
+### If you are a future Claude session asked to adjust this
+- The three deferred items above are the natural next increments.
+- Do NOT extend verification to rewrite the draft -- the verifier can
+  only flag. Only the main agent produces user-facing text. This is a
+  deliberate design choice to keep failure modes scoped.
+- Before making changes, check Cloud Logging for shadow-mode data.
+  Tune based on evidence, not vibes.
+
 ## Known operational notes
 
 - APScheduler runs in-process; jobs are in-memory and rebuilt from SQLite on restart
